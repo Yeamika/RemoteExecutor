@@ -1,5 +1,6 @@
 use remote_executor::{
-    apply_patch, glob_paths, read_path, ApplyOptions, GlobOptions, ReadOptions, ToolContext,
+    apply_diffy, apply_patch, glob_paths, read_path, ApplyOptions, DiffOptions, GlobOptions,
+    ReadOptions, ToolContext,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -68,6 +69,31 @@ async fn apply_patch_can_apply_patch() {
     apply_patch(ApplyOptions { patch_text: patch }, &ctx)
         .await
         .unwrap();
+
+    assert_eq!(fs::read_to_string(path).unwrap(), "after\n");
+}
+
+#[tokio::test]
+async fn diffy_can_apply_unified_diff() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    fs::write(&path, "before\n").unwrap();
+
+    let patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    let ctx = ToolContext::new(
+        Some(dir.path().to_path_buf()),
+        Some(dir.path().to_path_buf()),
+    );
+
+    apply_diffy(
+        DiffOptions {
+            patch_text: patch.to_string(),
+            strip: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(fs::read_to_string(path).unwrap(), "after\n");
 }

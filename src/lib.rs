@@ -10,7 +10,7 @@ mod websocket;
 
 pub use exec::{exbash, ExbashOptions, ExbashOutput};
 pub use fs_ops::{glob_paths, grep_paths, read_path, GlobOptions, GrepOptions, ReadOptions};
-pub use patch::{apply_patch, ApplyOptions, ApplyOutput, PatchFile};
+pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
 pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 pub use shell_manager::ShellManager;
 pub use stdio::{handle_request, run_stdio, StdioRequest, StdioResponse};

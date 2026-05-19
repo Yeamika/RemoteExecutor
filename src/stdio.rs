@@ -1,6 +1,6 @@
 use crate::{
-    apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, ApplyOptions, ExbashOptions,
-    GlobOptions, GrepOptions, ReadOptions, RgOptions, ToolContext,
+    apply_diffy, apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, ApplyOptions,
+    DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions, ToolContext,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,13 @@ pub async fn handle_request(request: StdioRequest) -> StdioResponse {
                 Err(err) => StdioResponse::err(id, err.to_string()),
             },
             Err(err) => StdioResponse::err(id, format!("bad read params: {err}")),
+        },
+        "diffy" | "apply_diff" => match serde_json::from_value::<DiffOptions>(request.params) {
+            Ok(options) => match apply_diffy(options, &ctx).await {
+                Ok(output) => StdioResponse::ok(id, serde_json::json!(output)),
+                Err(err) => StdioResponse::err(id, err.to_string()),
+            },
+            Err(err) => StdioResponse::err(id, format!("bad diffy params: {err}")),
         },
         "apply" | "apply_patch" => match serde_json::from_value::<ApplyOptions>(request.params) {
             Ok(options) => match apply_patch(options, &ctx).await {

@@ -1,9 +1,11 @@
 use crate::{ToolContext, ToolResult};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use diffy::patch_set::{FileOperation, FilePatch, ParseOptions, PatchKind, PatchSet};
+use diffy::{apply as diffy_apply, create_patch as diffy_create_patch};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ApplyOptions {
@@ -11,9 +13,12 @@ pub struct ApplyOptions {
     pub patch_text: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct ApplyOutput {
-    pub files: Vec<PatchFile>,
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiffOptions {
+    #[serde(rename = "patchText", alias = "patch", alias = "diff")]
+    pub patch_text: String,
+    #[serde(default)]
+    pub strip: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -40,11 +45,26 @@ pub async fn apply_patch(options: ApplyOptions, ctx: &ToolContext) -> Result<Too
     }
 
     let files = apply_tool_patch(ctx, &options.patch_text)?;
+    Ok(result_from_files(files))
+}
+
+pub async fn apply_diffy(options: DiffOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    if options.patch_text.trim().is_empty() {
+        return Err(anyhow!("patchText is required"));
+    }
+
+    let files = apply_unified_diff(ctx, &options.patch_text, options.strip)?;
+    Ok(result_from_files(files))
+}
+
+fn result_from_files(files: Vec<PatchFile>) -> ToolResult {
     let summary = files
         .iter()
         .map(|file| match file.kind.as_str() {
             "add" => format!("A {}", file.relative_path),
             "delete" => format!("D {}", file.relative_path),
+            "move" => format!("R {}", file.relative_path),
+            "copy" => format!("C {}", file.relative_path),
             _ => format!("M {}", file.relative_path),
         })
         .collect::<Vec<_>>()
@@ -56,11 +76,153 @@ pub async fn apply_patch(options: ApplyOptions, ctx: &ToolContext) -> Result<Too
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(ToolResult {
+    ToolResult {
         title: output.clone(),
         metadata: json!({ "diff": diff, "files": files, "diagnostics": {} }),
         output,
-    })
+    }
+}
+
+fn apply_unified_diff(
+    ctx: &ToolContext,
+    patch_text: &str,
+    strip: Option<usize>,
+) -> Result<Vec<PatchFile>> {
+    let mut files = Vec::new();
+    let patches = parse_file_patches(patch_text)?;
+
+    for file_patch in patches {
+        let op = file_patch.operation();
+        let operation = op.strip_prefix(strip.unwrap_or_else(|| inferred_strip(op)));
+
+        let file = match operation {
+            FileOperation::Create(path) => {
+                let target = resolve_patch_path(ctx, path.as_ref());
+                let before = String::new();
+                let after = apply_text_patch(&before, file_patch.patch())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, &after)?;
+                patch_file(ctx, &target, "add", &before, &after, None)
+            }
+            FileOperation::Delete(path) => {
+                let target = resolve_patch_path(ctx, path.as_ref());
+                let before = fs::read_to_string(&target)?;
+                let _ = apply_text_patch(&before, file_patch.patch())?;
+                fs::remove_file(&target)?;
+                patch_file(ctx, &target, "delete", &before, "", None)
+            }
+            FileOperation::Modify { original, modified } => {
+                let source = resolve_patch_path(ctx, original.as_ref());
+                let target = resolve_patch_path(ctx, modified.as_ref());
+                let before = fs::read_to_string(&source)?;
+                let after = apply_text_patch(&before, file_patch.patch())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, &after)?;
+                if source != target {
+                    fs::remove_file(&source)?;
+                }
+                let move_path = (source != target).then(|| target.to_string_lossy().into_owned());
+                let kind = if move_path.is_some() {
+                    "move"
+                } else {
+                    "update"
+                };
+                patch_file(ctx, &target, kind, &before, &after, move_path)
+            }
+            FileOperation::Rename { from, to } => {
+                let source = resolve_patch_path(ctx, from.as_ref());
+                let target = resolve_patch_path(ctx, to.as_ref());
+                let before = fs::read_to_string(&source)?;
+                let after = apply_text_patch(&before, file_patch.patch())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, &after)?;
+                if source != target {
+                    fs::remove_file(&source)?;
+                }
+                patch_file(
+                    ctx,
+                    &target,
+                    "move",
+                    &before,
+                    &after,
+                    Some(target.to_string_lossy().into_owned()),
+                )
+            }
+            FileOperation::Copy { from, to } => {
+                let source = resolve_patch_path(ctx, from.as_ref());
+                let target = resolve_patch_path(ctx, to.as_ref());
+                let before = fs::read_to_string(&source)?;
+                let after = apply_text_patch(&before, file_patch.patch())?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, &after)?;
+                patch_file(
+                    ctx,
+                    &target,
+                    "copy",
+                    &before,
+                    &after,
+                    Some(source.to_string_lossy().into_owned()),
+                )
+            }
+        };
+
+        files.push(file);
+    }
+
+    if files.is_empty() {
+        return Err(anyhow!("diffy patch did not contain any file changes"));
+    }
+
+    Ok(files)
+}
+
+fn parse_file_patches(patch_text: &str) -> Result<Vec<FilePatch<'_, str>>> {
+    let git = PatchSet::parse(patch_text, ParseOptions::gitdiff())
+        .collect::<std::result::Result<Vec<_>, _>>();
+    match git {
+        Ok(patches) if !patches.is_empty() => Ok(patches),
+        _ => PatchSet::parse(patch_text, ParseOptions::unidiff())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to parse unified diff"),
+    }
+}
+
+fn apply_text_patch(base: &str, patch: &PatchKind<'_, str>) -> Result<String> {
+    let patch = patch
+        .as_text()
+        .ok_or_else(|| anyhow!("binary patches are not supported"))?;
+    diffy_apply(base, patch).map_err(|err| anyhow!("diffy apply failed: {err}"))
+}
+
+fn resolve_patch_path(ctx: &ToolContext, path: &str) -> PathBuf {
+    ctx.resolve(path)
+}
+
+fn inferred_strip(operation: &FileOperation<'_, str>) -> usize {
+    match operation {
+        FileOperation::Rename { .. } | FileOperation::Copy { .. } => 0,
+        FileOperation::Create(path) => has_git_prefix(path.as_ref()).then_some(1).unwrap_or(0),
+        FileOperation::Delete(path) => has_git_prefix(path.as_ref()).then_some(1).unwrap_or(0),
+        FileOperation::Modify { original, modified } => {
+            if has_git_prefix(original.as_ref()) || has_git_prefix(modified.as_ref()) {
+                1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+fn has_git_prefix(path: &str) -> bool {
+    matches!(path.split_once('/'), Some((prefix, _)) if prefix == "a" || prefix == "b")
 }
 
 fn apply_tool_patch(ctx: &ToolContext, patch: &str) -> Result<Vec<PatchFile>> {
@@ -123,27 +285,14 @@ fn apply_add(
         fs::create_dir_all(parent)?;
     }
     fs::write(&target, &after)?;
-    let additions = after.lines().count();
-    Ok((
-        patch_file(ctx, &target, "add", "", &after, additions, 0, None),
-        i,
-    ))
+    Ok((patch_file(ctx, &target, "add", "", &after, None), i))
 }
 
 fn apply_delete(ctx: &ToolContext, path: &str) -> Result<PatchFile> {
     let target = ctx.resolve(path);
     let before = fs::read_to_string(&target)?;
     fs::remove_file(&target)?;
-    Ok(patch_file(
-        ctx,
-        &target,
-        "delete",
-        &before,
-        "",
-        0,
-        before.lines().count(),
-        None,
-    ))
+    Ok(patch_file(ctx, &target, "delete", &before, "", None))
 }
 
 fn apply_update(
@@ -168,7 +317,7 @@ fn apply_update(
     while i < end && !lines[i].starts_with("***") {
         let line = lines[i];
         if line.starts_with("@@") {
-            apply_chunk(&mut after, &old, &new)?;
+            after = apply_chunk(&after, &old, &new)?;
             old.clear();
             new.clear();
         } else if let Some(text) = line.strip_prefix(' ') {
@@ -182,7 +331,7 @@ fn apply_update(
         i += 1;
     }
 
-    apply_chunk(&mut after, &old, &new)?;
+    after = apply_chunk(&after, &old, &new)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -198,38 +347,45 @@ fn apply_update(
         "update"
     };
     Ok((
-        patch_file(
-            ctx,
-            &target,
-            kind,
-            &before,
-            &after,
-            count_added(&before, &after),
-            count_deleted(&before, &after),
-            move_path,
-        ),
+        patch_file(ctx, &target, kind, &before, &after, move_path),
         i,
     ))
 }
 
-fn apply_chunk(content: &mut String, old: &[String], new: &[String]) -> Result<()> {
+fn apply_chunk(content: &str, old: &[String], new: &[String]) -> Result<String> {
     if old.is_empty() && new.is_empty() {
-        return Ok(());
+        return Ok(content.to_string());
     }
-    let old_text = old.join("\n") + "\n";
-    let new_text = new.join("\n") + "\n";
+    let old_text = chunk_text(old);
+    let new_text = chunk_text(new);
+    let mut next = content.to_string();
     if let Some(pos) = content.find(&old_text) {
-        content.replace_range(pos..pos + old_text.len(), &new_text);
-        return Ok(());
+        next.replace_range(pos..pos + old_text.len(), &new_text);
+        let patch = diffy_create_patch(content, &next);
+        return diffy_apply(content, &patch).map_err(|err| anyhow!("diffy apply failed: {err}"));
     }
+
     let trimmed = old_text.trim_end_matches('\n');
-    if let Some(pos) = content.find(trimmed) {
-        content.replace_range(pos..pos + trimmed.len(), new_text.trim_end_matches('\n'));
-        return Ok(());
+    if !trimmed.is_empty() {
+        if let Some(pos) = content.find(trimmed) {
+            next.replace_range(pos..pos + trimmed.len(), new_text.trim_end_matches('\n'));
+            let patch = diffy_create_patch(content, &next);
+            return diffy_apply(content, &patch)
+                .map_err(|err| anyhow!("diffy apply failed: {err}"));
+        }
     }
+
     Err(anyhow!(
         "apply_patch verification failed: patch hunk did not match file content"
     ))
+}
+
+fn chunk_text(lines: &[String]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
 }
 
 fn patch_file(
@@ -238,15 +394,16 @@ fn patch_file(
     kind: &str,
     before: &str,
     after: &str,
-    additions: usize,
-    deletions: usize,
     move_path: Option<String>,
 ) -> PatchFile {
+    let diff = diff_text(path, before, after);
+    let additions = count_diff_lines(&diff, '+');
+    let deletions = count_diff_lines(&diff, '-');
     PatchFile {
         file_path: path.to_string_lossy().into_owned(),
         relative_path: ctx.title(path),
         kind: kind.to_string(),
-        diff: simple_diff(path, before, after),
+        diff,
         before: before.to_string(),
         after: after.to_string(),
         additions,
@@ -255,20 +412,15 @@ fn patch_file(
     }
 }
 
-fn simple_diff(path: &Path, before: &str, after: &str) -> String {
-    format!(
-        "--- {}\n+++ {}\n-{}\n+{}",
-        path.display(),
-        path.display(),
-        before.trim_end(),
-        after.trim_end()
-    )
+fn diff_text(path: &Path, before: &str, after: &str) -> String {
+    let diff = diffy_create_patch(before, after).to_string();
+    diff.replacen("--- original", &format!("--- {}", path.display()), 1)
+        .replacen("+++ modified", &format!("+++ {}", path.display()), 1)
 }
 
-fn count_added(before: &str, after: &str) -> usize {
-    after.lines().count().saturating_sub(before.lines().count())
-}
-
-fn count_deleted(before: &str, after: &str) -> usize {
-    before.lines().count().saturating_sub(after.lines().count())
+fn count_diff_lines(diff: &str, marker: char) -> usize {
+    diff.lines()
+        .filter(|line| line.starts_with(marker))
+        .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
+        .count()
 }
