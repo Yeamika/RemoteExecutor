@@ -11,6 +11,14 @@ name = "remote-executor-demo"
 path = "src/bin/demo.rs"
 
 [[bin]]
+name = "remote-executor"
+path = "src/bin/executor.rs"
+
+[[bin]]
+name = "remote-caller"
+path = "src/bin/caller.rs"
+
+[[bin]]
 name = "remote-executor-stdio"
 path = "src/bin/stdio.rs"
 

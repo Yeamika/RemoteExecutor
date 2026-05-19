@@ -1,19 +1,26 @@
+mod caller;
 mod exec;
 mod exec_support;
+mod executor;
 mod fs_ops;
 mod patch;
 mod rg;
 mod shell_manager;
-mod stdio;
 mod tool;
 mod websocket;
 
+pub use caller::{
+    handle_request, run_stdio, run_stdio_with_caller, Caller, ConnectExecutorOptions,
+    SetDefaultExecutorOptions, StdioRequest, StdioResponse,
+};
 pub use exec::{exbash, ExbashOptions, ExbashOutput};
+pub use executor::{
+    dispatch_tool, start_executor_ws, Executor, ExecutorInfo, ExecutorRequest, ExecutorResponse,
+};
 pub use fs_ops::{glob_paths, grep_paths, read_path, GlobOptions, GrepOptions, ReadOptions};
 pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
 pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 pub use shell_manager::ShellManager;
-pub use stdio::{handle_request, run_stdio, StdioRequest, StdioResponse};
 pub use tool::{ToolContext, ToolResult};
 
 use anyhow::Result;

@@ -11,6 +11,7 @@ async fn stdio_dispatches_glob() {
         params: json!({"pattern":"*.rs"}),
         directory: None,
         worktree: None,
+        executor: None,
     };
 
     let response = handle_request(request).await;
@@ -30,6 +31,7 @@ async fn stdio_dispatches_diffy() {
         }),
         directory: Some(dir.path().to_path_buf()),
         worktree: Some(dir.path().to_path_buf()),
+        executor: None,
     };
 
     let response = handle_request(request).await;
