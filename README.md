@@ -16,16 +16,16 @@ Run a standalone Executor node:
 cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001
 ```
 
-Expose the same Executor to `pty-t` clients on a separate terminal WebSocket:
+The same `--listen` endpoint now accepts both Caller tool requests and `pty-t` clients.
 
 ```bash
-cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001 --pty-listen 0.0.0.0:8080 --pty main
+cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001 --pty main
 ```
 
-Then connect with `pty-t`'s client:
+Then connect with `pty-t`'s client on the same URL:
 
 ```bash
-ptyt --url ws://host:8080 --pty main
+ptyt --url ws://host:9001 --pty main
 ```
 
 Run a Caller for the upper tool layer:

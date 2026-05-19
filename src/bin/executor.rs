@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use pty_t_core::CommandSpec;
-use remote_executor::{start_executor_ws, Executor, ExecutorInfo, ShellManager};
+use remote_executor::{start_shared_executor_ws, Executor, ExecutorInfo, ShellManager};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Parser)]
@@ -17,9 +17,6 @@ struct Args {
 
     #[arg(long)]
     device: Option<String>,
-
-    #[arg(long)]
-    pty_listen: Option<String>,
 
     #[arg(long, default_value = "main")]
     pty: String,
@@ -39,20 +36,15 @@ async fn main() -> Result<()> {
         device: args.device.or_else(|| std::env::var("HOSTNAME").ok()),
         labels: BTreeMap::new(),
     });
-    let actual = start_executor_ws(args.listen, executor)?;
-    println!("executor ws://{actual}");
-
-    if let Some(pty_listen) = args.pty_listen {
-        let manager = ShellManager::default_shell(80, 24);
-        manager.create_pty(
-            args.pty.clone(),
-            CommandSpec::new(args.pty_program.unwrap_or_else(default_program)),
-            None,
-            None,
-        )?;
-        let pty_actual = manager.start_websocket(pty_listen)?;
-        println!("pty-t ws://{pty_actual} pty={}", args.pty);
-    }
+    let manager = ShellManager::default_shell(80, 24);
+    manager.create_pty(
+        args.pty.clone(),
+        CommandSpec::new(args.pty_program.unwrap_or_else(default_program)),
+        None,
+        None,
+    )?;
+    let actual = start_shared_executor_ws(args.listen, executor, manager)?;
+    println!("ws://{actual} pty={}", args.pty);
 
     tokio::signal::ctrl_c().await?;
     Ok(())

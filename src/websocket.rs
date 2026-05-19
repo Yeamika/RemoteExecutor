@@ -23,6 +23,42 @@ pub fn start_listener(addr: String, manager: ShellManager) -> Result<String> {
     Ok(actual_addr)
 }
 
+pub async fn handle_first_text(
+    first_text: String,
+    mut ws_write: futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<TcpStream>,
+        Message,
+    >,
+    ws_read: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>,
+    peer_addr: SocketAddr,
+    manager: ShellManager,
+) -> Result<()> {
+    if let Ok(admin) = serde_json::from_str::<AdminText>(&first_text) {
+        let response = handle_admin(&manager, admin);
+        send_response(&mut ws_write, response).await?;
+        return Ok(());
+    }
+
+    let Ok(ClientText::Hello {
+        id,
+        pty,
+        cols,
+        rows,
+    }) = serde_json::from_str::<ClientText>(&first_text)
+    else {
+        send_response(
+            &mut ws_write,
+            Ok(ServerText::Error {
+                message: "expected ptyt hello or read-only admin request".to_string(),
+            }),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    handle_terminal_client(manager, ws_write, ws_read, peer_addr, id, pty, cols, rows).await
+}
+
 async fn accept_loop(listener: TcpListener, manager: ShellManager) {
     loop {
         match listener.accept().await {
@@ -48,37 +84,20 @@ async fn handle_connection(
     manager: ShellManager,
 ) -> Result<()> {
     let ws = accept_async(stream).await?;
-    let (mut ws_write, mut ws_read) = ws.split();
+    let (ws_write, mut ws_read) = ws.split();
     let first = ws_read
         .next()
         .await
         .ok_or_else(|| anyhow!("client disconnected before hello"))??;
     let first_text = first.into_text().context("first frame must be text")?;
-
-    if let Ok(admin) = serde_json::from_str::<AdminText>(&first_text) {
-        let response = handle_admin(&manager, admin);
-        send_response(&mut ws_write, response).await?;
-        return Ok(());
-    }
-
-    let Ok(ClientText::Hello {
-        id,
-        pty,
-        cols,
-        rows,
-    }) = serde_json::from_str::<ClientText>(&first_text)
-    else {
-        send_response(
-            &mut ws_write,
-            Ok(ServerText::Error {
-                message: "expected ptyt hello or read-only admin request".to_string(),
-            }),
-        )
-        .await?;
-        return Ok(());
-    };
-
-    handle_terminal_client(manager, ws_write, ws_read, peer_addr, id, pty, cols, rows).await
+    handle_first_text(
+        first_text.to_string(),
+        ws_write,
+        ws_read,
+        peer_addr,
+        manager,
+    )
+    .await
 }
 
 async fn handle_terminal_client(

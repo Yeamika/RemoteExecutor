@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
@@ -132,29 +133,97 @@ pub fn start_executor_ws(addr: impl Into<String>, executor: Executor) -> Result<
     Ok(actual_addr)
 }
 
+pub fn start_shared_executor_ws(
+    addr: impl Into<String>,
+    executor: Executor,
+    manager: crate::ShellManager,
+) -> Result<String> {
+    let addr = addr.into();
+    let std_listener = std::net::TcpListener::bind(&addr)?;
+    std_listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(std_listener)?;
+    let actual_addr = listener.local_addr()?.to_string();
+
+    tokio::spawn(async move {
+        while let Ok((stream, peer_addr)) = listener.accept().await {
+            let executor = executor.clone();
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                if let Err(err) = handle_shared_ws(stream, peer_addr, executor, manager).await {
+                    if is_disconnect_error(&err) {
+                        return;
+                    }
+                    eprintln!("shared executor websocket error: {err:#}");
+                }
+            });
+        }
+    });
+
+    Ok(actual_addr)
+}
+
 async fn handle_executor_ws(stream: TcpStream, executor: Executor) -> Result<()> {
     let ws = accept_async(stream).await?;
     let (mut write, mut read) = ws.split();
 
     while let Some(message) = read.next().await {
         match message? {
-            Message::Text(text) => {
-                let response = match serde_json::from_str::<ExecutorRequest>(&text) {
-                    Ok(request) => executor.handle(request).await,
-                    Err(err) => {
-                        ExecutorResponse::err(Value::Null, None, format!("invalid request: {err}"))
-                    }
-                };
-                write
-                    .send(Message::Text(serde_json::to_string(&response)?.into()))
-                    .await?;
-            }
+            Message::Text(text) => send_executor_response(&mut write, &executor, &text).await?,
             Message::Ping(data) => write.send(Message::Pong(data)).await?,
             Message::Close(_) => break,
             Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 
+    Ok(())
+}
+
+async fn handle_shared_ws(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    executor: Executor,
+    manager: crate::ShellManager,
+) -> Result<()> {
+    let ws = accept_async(stream).await?;
+    let (mut write, mut read) = ws.split();
+    let Some(first) = read.next().await else {
+        return Ok(());
+    };
+    let first = first?;
+    let first_text = first.into_text()?;
+
+    if serde_json::from_str::<ExecutorRequest>(&first_text).is_ok() {
+        send_executor_response(&mut write, &executor, &first_text).await?;
+        while let Some(message) = read.next().await {
+            match message? {
+                Message::Text(text) => send_executor_response(&mut write, &executor, &text).await?,
+                Message::Ping(data) => write.send(Message::Pong(data)).await?,
+                Message::Close(_) => break,
+                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+        return Ok(());
+    }
+
+    crate::websocket::handle_first_text(first_text.to_string(), write, read, peer_addr, manager)
+        .await
+}
+
+async fn send_executor_response(
+    write: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<TcpStream>,
+        Message,
+    >,
+    executor: &Executor,
+    text: &str,
+) -> Result<()> {
+    let response = match serde_json::from_str::<ExecutorRequest>(text) {
+        Ok(request) => executor.handle(request).await,
+        Err(err) => ExecutorResponse::err(Value::Null, None, format!("invalid request: {err}")),
+    };
+    write
+        .send(Message::Text(serde_json::to_string(&response)?.into()))
+        .await?;
     Ok(())
 }
 
