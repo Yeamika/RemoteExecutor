@@ -1,0 +1,51 @@
+mod exec;
+mod exec_support;
+mod fs_ops;
+mod patch;
+mod rg;
+mod shell_manager;
+mod stdio;
+mod tool;
+mod websocket;
+
+pub use exec::{exbash, ExbashOptions, ExbashOutput};
+pub use fs_ops::{glob_paths, grep_paths, read_path, GlobOptions, GrepOptions, ReadOptions};
+pub use patch::{apply_patch, ApplyOptions, ApplyOutput, PatchFile};
+pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
+pub use shell_manager::ShellManager;
+pub use stdio::{handle_request, run_stdio, StdioRequest, StdioResponse};
+pub use tool::{ToolContext, ToolResult};
+
+use anyhow::Result;
+use std::path::PathBuf;
+
+#[derive(Clone)]
+pub struct RemoteExecutor {
+    shell: ShellManager,
+    rg: RgExecutor,
+}
+
+impl RemoteExecutor {
+    pub fn new(shell: ShellManager, rg: RgExecutor) -> Self {
+        Self { shell, rg }
+    }
+
+    pub fn default_shell(root: impl Into<PathBuf>, cols: u16, rows: u16) -> Self {
+        Self {
+            shell: ShellManager::default_shell(cols, rows),
+            rg: RgExecutor::new(root),
+        }
+    }
+
+    pub fn shell(&self) -> &ShellManager {
+        &self.shell
+    }
+
+    pub fn rg(&self) -> &RgExecutor {
+        &self.rg
+    }
+
+    pub async fn search(&self, options: RgOptions) -> Result<RgOutput> {
+        self.rg.search(options).await
+    }
+}
