@@ -10,16 +10,22 @@ Modules:
 - `fs_ops`: opencode-style `glob`, `grep`, and `read` helpers. Search is backed by ripgrep crates, not an external `rg` binary.
 - `patch`: standard unified diff application via `diffy` plus opencode-style `apply_patch` support.
 
-Run the demo:
-
-```bash
-cargo run --manifest-path RemoteExecutor/Cargo.toml --bin remote-executor-demo
-```
-
 Run a standalone Executor node:
 
 ```bash
 cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001
+```
+
+Expose the same Executor to `pty-t` clients on a separate terminal WebSocket:
+
+```bash
+cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001 --pty-listen 0.0.0.0:8080 --pty main
+```
+
+Then connect with `pty-t`'s client:
+
+```bash
+ptyt --url ws://host:8080 --pty main
 ```
 
 Run a Caller for the upper tool layer:

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use remote_executor::{start_executor_ws, Executor, ExecutorInfo};
+use pty_t_core::CommandSpec;
+use remote_executor::{start_executor_ws, Executor, ExecutorInfo, ShellManager};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Parser)]
@@ -16,6 +17,15 @@ struct Args {
 
     #[arg(long)]
     device: Option<String>,
+
+    #[arg(long)]
+    pty_listen: Option<String>,
+
+    #[arg(long, default_value = "main")]
+    pty: String,
+
+    #[arg(long)]
+    pty_program: Option<String>,
 }
 
 #[tokio::main]
@@ -30,7 +40,28 @@ async fn main() -> Result<()> {
         labels: BTreeMap::new(),
     });
     let actual = start_executor_ws(args.listen, executor)?;
-    println!("ws://{actual}");
+    println!("executor ws://{actual}");
+
+    if let Some(pty_listen) = args.pty_listen {
+        let manager = ShellManager::default_shell(80, 24);
+        manager.create_pty(
+            args.pty.clone(),
+            CommandSpec::new(args.pty_program.unwrap_or_else(default_program)),
+            None,
+            None,
+        )?;
+        let pty_actual = manager.start_websocket(pty_listen)?;
+        println!("pty-t ws://{pty_actual} pty={}", args.pty);
+    }
+
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+fn default_program() -> String {
+    if cfg!(windows) {
+        "powershell.exe".to_string()
+    } else {
+        "bash".to_string()
+    }
 }
