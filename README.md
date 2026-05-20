@@ -34,7 +34,14 @@ Run a Caller for the upper tool layer:
 cargo run --bin remote-caller
 ```
 
+Run the MCP stdio wrapper for Caller:
+
+```bash
+cargo run --bin remote-caller-mcp
+```
+
 The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`.
+The MCP wrapper speaks JSON-RPC over stdio and exposes the same Caller/Executor tools through `tools/list` and `tools/call`.
 
 Patch tools:
 
@@ -48,5 +55,6 @@ Caller tools:
 - `set_default_executor`
 
 Executors are addressed over WebSocket. The built-in `local` executor is started automatically by `Caller`.
+MCP calls can route to a specific Executor with the optional `targetExecutor` argument.
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.

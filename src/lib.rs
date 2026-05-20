@@ -10,8 +10,9 @@ mod tool;
 mod websocket;
 
 pub use caller::{
-    handle_request, run_stdio, run_stdio_with_caller, Caller, ConnectExecutorOptions,
-    SetDefaultExecutorOptions, StdioRequest, StdioResponse,
+    handle_mcp_message, handle_request, run_mcp_stdio, run_mcp_stdio_with_caller, run_stdio,
+    run_stdio_with_caller, Caller, ConnectExecutorOptions, SetDefaultExecutorOptions, StdioRequest,
+    StdioResponse,
 };
 pub use exec::{exbash, ExbashOptions, ExbashOutput};
 pub use executor::{

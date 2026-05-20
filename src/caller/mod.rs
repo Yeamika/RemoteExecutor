@@ -1,3 +1,5 @@
+mod mcp;
+
 use crate::{
     start_executor_ws, Executor, ExecutorInfo, ExecutorRequest, ExecutorResponse, ToolResult,
 };
@@ -14,6 +16,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub type StdioRequest = ExecutorRequest;
 pub type StdioResponse = ExecutorResponse;
+
+pub use mcp::{handle_mcp_message, run_mcp_stdio, run_mcp_stdio_with_caller};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConnectExecutorOptions {

@@ -14,6 +14,10 @@ path = "src/bin/executor.rs"
 name = "remote-caller"
 path = "src/bin/caller.rs"
 
+[[bin]]
+name = "remote-caller-mcp"
+path = "src/bin/caller_mcp.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

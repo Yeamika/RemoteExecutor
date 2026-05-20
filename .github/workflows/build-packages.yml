@@ -88,6 +88,7 @@ jobs:
           mkdir -p "dist/${pkg}"
           cp "target/${{ matrix.target }}/release/remote-executor" "dist/${pkg}/"
           cp "target/${{ matrix.target }}/release/remote-caller" "dist/${pkg}/"
+          cp "target/${{ matrix.target }}/release/remote-caller-mcp" "dist/${pkg}/"
           cp README.md "dist/${pkg}/"
           tar -C dist -czf "dist/${pkg}.tar.gz" "${pkg}"
 
@@ -99,6 +100,7 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$pkg" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/remote-executor.exe" "dist/$pkg/"
           Copy-Item "target/${{ matrix.target }}/release/remote-caller.exe" "dist/$pkg/"
+          Copy-Item "target/${{ matrix.target }}/release/remote-caller-mcp.exe" "dist/$pkg/"
           Copy-Item "README.md" "dist/$pkg/"
           Compress-Archive -Path "dist/$pkg/*" -DestinationPath "dist/$pkg.zip" -Force
 
