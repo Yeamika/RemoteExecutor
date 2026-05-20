@@ -29,6 +29,10 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(tools
         .iter()
         .any(|tool| tool["name"] == "connect_to_executor"));
+    let read = tools.iter().find(|tool| tool["name"] == "read").unwrap();
+    let properties = &read["inputSchema"]["properties"];
+    assert!(properties.get("toolTimeoutMs").is_some());
+    assert!(properties.get("callTimeoutMs").is_none());
 }
 
 #[tokio::test]

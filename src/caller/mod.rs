@@ -11,8 +11,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+
+const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
 
 pub type StdioRequest = ExecutorRequest;
 pub type StdioResponse = ExecutorResponse;
@@ -202,7 +205,7 @@ impl ExecutorEndpoint {
     async fn call(&self, mut request: ExecutorRequest) -> ExecutorResponse {
         let request_id = request.id.clone();
         request.executor = None;
-        match call_ws(&self.url, request).await {
+        match call_ws(&self.url, request, DEFAULT_CALL_TIMEOUT_MS).await {
             Ok(mut response) => {
                 response
                     .executor
@@ -258,7 +261,26 @@ pub async fn handle_request(request: StdioRequest) -> StdioResponse {
     }
 }
 
-async fn call_ws(url: &str, request: ExecutorRequest) -> Result<ExecutorResponse> {
+async fn call_ws(
+    url: &str,
+    request: ExecutorRequest,
+    call_timeout_ms: u64,
+) -> Result<ExecutorResponse> {
+    let request_id = request.id.clone();
+    match timeout(
+        Duration::from_millis(call_timeout_ms),
+        call_ws_inner(url, request),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!(
+            "executor call timed out after {call_timeout_ms}ms for request {request_id}"
+        )),
+    }
+}
+
+async fn call_ws_inner(url: &str, request: ExecutorRequest) -> Result<ExecutorResponse> {
     let request_id = request.id.clone();
     let (ws, _) = connect_async(url).await?;
     let (mut write, mut read) = ws.split();

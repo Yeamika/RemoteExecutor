@@ -11,8 +11,12 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{timeout, Duration};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 5_000;
+const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutorInfo {
@@ -38,6 +42,13 @@ pub struct ExecutorRequest {
     pub worktree: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
+    #[serde(
+        default,
+        rename = "toolTimeoutMs",
+        alias = "tool_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,8 +110,26 @@ impl Executor {
 
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
+        let method = request.method.clone();
+        let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
         let ctx = ToolContext::new(request.directory, request.worktree);
-        match dispatch_tool(&request.method, request.params, &ctx).await {
+        let result = if is_exbash_method(&method) {
+            dispatch_tool(&method, request.params, &ctx).await
+        } else {
+            match timeout(
+                Duration::from_millis(timeout_ms),
+                dispatch_tool(&method, request.params, &ctx),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "tool {method} timed out after {timeout_ms}ms"
+                )),
+            }
+        };
+
+        match result {
             Ok(output) => {
                 ExecutorResponse::ok(id, Some(self.info.id.clone()), serde_json::json!(output))
             }
@@ -232,6 +261,16 @@ fn is_disconnect_error(err: &anyhow::Error) -> bool {
     text.contains("Connection reset without closing handshake")
         || text.contains("connection reset by peer")
         || text.contains("Broken pipe")
+}
+
+fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_TOOL_TIMEOUT_MS)
+        .min(MAX_TOOL_TIMEOUT_MS)
+}
+
+fn is_exbash_method(method: &str) -> bool {
+    matches!(method, "exbash" | "exec")
 }
 
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {

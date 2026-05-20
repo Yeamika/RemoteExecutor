@@ -89,6 +89,8 @@ fn request_from_tool_call(id: Value, name: &str, arguments: Value) -> ExecutorRe
 
     let executor = take_string(&mut params, "targetExecutor")
         .or_else(|| take_string(&mut params, "target_executor"));
+    let tool_timeout_ms =
+        take_u64(&mut params, "toolTimeoutMs").or_else(|| take_u64(&mut params, "tool_timeout_ms"));
     let directory = take_path(&mut params, "directory");
     let worktree = take_path(&mut params, "worktree");
 
@@ -99,6 +101,7 @@ fn request_from_tool_call(id: Value, name: &str, arguments: Value) -> ExecutorRe
         directory,
         worktree,
         executor,
+        tool_timeout_ms,
     }
 }
 
@@ -110,6 +113,10 @@ fn take_string(params: &mut Map<String, Value>, key: &str) -> Option<String> {
 
 fn take_path(params: &mut Map<String, Value>, key: &str) -> Option<PathBuf> {
     take_string(params, key).map(PathBuf::from)
+}
+
+fn take_u64(params: &mut Map<String, Value>, key: &str) -> Option<u64> {
+    params.remove(key).and_then(|value| value.as_u64())
 }
 
 fn response_to_tool_result(response: ExecutorResponse) -> Value {
@@ -292,6 +299,10 @@ fn add_routing(mut schema: Value) -> Value {
         return schema;
     };
     properties.insert("targetExecutor".to_string(), json!({ "type": "string" }));
+    properties.insert(
+        "toolTimeoutMs".to_string(),
+        json!({ "type": "number", "maximum": 600000 }),
+    );
     properties.insert("directory".to_string(), json!({ "type": "string" }));
     properties.insert("worktree".to_string(), json!({ "type": "string" }));
     schema

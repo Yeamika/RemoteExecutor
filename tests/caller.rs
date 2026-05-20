@@ -17,6 +17,7 @@ async fn caller_lists_local_executor() {
             directory: None,
             worktree: None,
             executor: None,
+            tool_timeout_ms: None,
         })
         .await;
 
@@ -52,6 +53,7 @@ async fn caller_routes_to_connected_executor() {
             directory: Some(dir.path().to_path_buf()),
             worktree: Some(dir.path().to_path_buf()),
             executor: None,
+            tool_timeout_ms: None,
         })
         .await;
 

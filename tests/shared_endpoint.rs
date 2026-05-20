@@ -27,6 +27,7 @@ async fn shared_endpoint_accepts_tool_and_pty_protocols() {
         directory: Some(dir.path().to_path_buf()),
         worktree: Some(dir.path().to_path_buf()),
         executor: None,
+        tool_timeout_ms: None,
     };
     tool_ws
         .send(Message::Text(

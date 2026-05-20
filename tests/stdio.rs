@@ -12,6 +12,7 @@ async fn stdio_dispatches_glob() {
         directory: None,
         worktree: None,
         executor: None,
+        tool_timeout_ms: None,
     };
 
     let response = handle_request(request).await;
@@ -32,6 +33,7 @@ async fn stdio_dispatches_diffy() {
         directory: Some(dir.path().to_path_buf()),
         worktree: Some(dir.path().to_path_buf()),
         executor: None,
+        tool_timeout_ms: None,
     };
 
     let response = handle_request(request).await;
