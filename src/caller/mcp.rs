@@ -323,7 +323,6 @@ fn exbash_schema() -> Value {
             prop("asyncID", "string"),
             prop("action", "string"),
             prop("wait", "string"),
-            prop("window", "number"),
             prop("text", "string"),
             prop("filePath", "string"),
         ],

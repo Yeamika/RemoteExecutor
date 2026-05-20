@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::time;
 
 const OUTPUT_LIMIT: usize = 30_000;
+const CAPTURE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RunDetail {
@@ -25,8 +25,6 @@ pub(crate) struct RunDetail {
     pub(crate) state: String,
     #[serde(rename = "exitCode", skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<i32>,
-    #[serde(rename = "resultPath")]
-    pub(crate) result_path: String,
     #[serde(rename = "linePointer")]
     pub(crate) line_pointer: usize,
     pub(crate) command: String,
@@ -45,7 +43,7 @@ pub(crate) struct Job {
     pub(crate) detail: Mutex<RunDetail>,
     pub(crate) manager: ShellManager,
     pty: String,
-    log: Mutex<tokio::fs::File>,
+    output: Mutex<Vec<u8>>,
 }
 
 static JOBS: OnceLock<Mutex<HashMap<String, Arc<Job>>>> = OnceLock::new();
@@ -61,13 +59,6 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         .ok_or_else(|| anyhow!("exbash requires a PTY-backed ShellManager"))?;
     let cwd = cwd_for(options, ctx);
     let id = next_id();
-    let result_path = data_root().join(format!("{id}.log"));
-    tokio::fs::create_dir_all(result_path.parent().unwrap()).await?;
-    let log = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&result_path)
-        .await?;
     let spec = command_spec(&command, options.executor.as_deref(), &cwd);
     let session = manager.create_pty(id.clone(), spec, None, None)?;
     let output = session.subscribe_output();
@@ -78,7 +69,6 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         status: "running".to_string(),
         state: "running".to_string(),
         exit_code: None,
-        result_path: result_path.to_string_lossy().into_owned(),
         line_pointer: 0,
         command,
         description: description(options),
@@ -92,10 +82,10 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         detail: Mutex::new(detail),
         manager,
         pty: id.clone(),
-        log: Mutex::new(log),
+        output: Mutex::new(Vec::new()),
     });
     jobs().lock().await.insert(id, job.clone());
-    spawn_output_log(output, job.clone());
+    spawn_output_capture(output, job.clone());
     if let Some(timeout) = options.timeout {
         spawn_timeout(job.clone(), timeout);
     }
@@ -157,27 +147,23 @@ pub(crate) async fn input_data(
 }
 
 pub(crate) async fn attach(
-    path: &str,
-    offset: u64,
+    job: &Arc<Job>,
+    output_offset: usize,
     timeout: u64,
-    window: usize,
-) -> serde_json::Value {
-    let end = now_ms() + u128::from(timeout);
-    while now_ms() < end {
-        let data = tokio::fs::read(path).await.unwrap_or_default();
-        if data.len() as u64 > offset {
-            let next = &data[offset as usize..];
-            let start = next.len().saturating_sub(window);
-            return json!({
-                "output": String::from_utf8_lossy(&next[start..]),
-                "bytes": next.len(),
-                "overflow": next.len() > window,
-                "timedOut": false,
-            });
-        }
-        time::sleep(Duration::from_millis(50)).await;
-    }
-    json!({ "output": "", "bytes": 0, "overflow": false, "timedOut": true })
+) -> Result<(String, serde_json::Value)> {
+    time::sleep(Duration::from_millis(timeout)).await;
+    refresh_job(job).await?;
+    let snapshot = String::from_utf8_lossy(&job.manager.snapshot(&job.pty)?).into_owned();
+    let output_bytes = captured_output_len(job).await.saturating_sub(output_offset);
+    Ok((snapshot, json!({ "outputBytes": output_bytes })))
+}
+
+pub(crate) async fn captured_output(job: &Arc<Job>) -> String {
+    String::from_utf8_lossy(&job.output.lock().await).into_owned()
+}
+
+pub(crate) async fn captured_output_len(job: &Arc<Job>) -> usize {
+    job.output.lock().await.len()
 }
 
 pub(crate) fn jobs() -> &'static Mutex<HashMap<String, Arc<Job>>> {
@@ -209,12 +195,18 @@ pub(crate) fn merge_json(target: &mut serde_json::Value, source: serde_json::Val
     }
 }
 
-fn spawn_output_log(mut output: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, job: Arc<Job>) {
+fn spawn_output_capture(mut output: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, job: Arc<Job>) {
     tokio::spawn(async move {
         while let Some(data) = output.recv().await {
-            if job.log.lock().await.write_all(&data).await.is_ok() {
-                job.detail.lock().await.line_pointer += count_lines(&data);
+            {
+                let mut captured = job.output.lock().await;
+                captured.extend(&data);
+                if captured.len() > CAPTURE_LIMIT {
+                    let remove = captured.len() - CAPTURE_LIMIT;
+                    captured.drain(..remove);
+                }
             }
+            job.detail.lock().await.line_pointer += count_lines(&data);
         }
     });
 }
@@ -260,13 +252,6 @@ fn cwd_for(options: &ExbashOptions, ctx: &ToolContext) -> PathBuf {
         .as_ref()
         .map(|path| ctx.resolve(path))
         .unwrap_or_else(|| ctx.directory.clone())
-}
-
-fn data_root() -> PathBuf {
-    std::env::var_os("REMOTE_EXECUTOR_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("remote-executor"))
-        .join("exbash")
 }
 
 fn next_id() -> String {

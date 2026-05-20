@@ -1,6 +1,6 @@
 use crate::exec_support::{
-    attach, clip, description, input_data, jobs, merge_json, refresh_job, remove_job_pty,
-    start_job, stop_job, wait_for_stop,
+    attach, captured_output, captured_output_len, clip, description, input_data, jobs, merge_json,
+    refresh_job, remove_job_pty, start_job, stop_job, wait_for_stop,
 };
 use crate::{ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 const ASYNC_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
-const INPUT_WINDOW: usize = 100;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExbashOptions {
@@ -35,8 +34,6 @@ pub struct ExbashOptions {
     pub action: Option<String>,
     #[serde(default)]
     pub wait: Option<String>,
-    #[serde(default)]
-    pub window: Option<usize>,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default, rename = "filePath")]
@@ -68,9 +65,7 @@ async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result
     let job = start_job(&options, ctx).await?;
     if wait_for_stop(&job, async_timeout).await {
         let detail = job.detail.lock().await.clone();
-        let output = tokio::fs::read_to_string(&detail.result_path)
-            .await
-            .unwrap_or_default();
+        let output = captured_output(&job).await;
         jobs().lock().await.remove(&detail.async_id);
         remove_job_pty(&job);
         return Ok(ToolResult {
@@ -161,11 +156,9 @@ async fn control(options: ExbashOptions) -> Result<ToolResult> {
             if job.detail.lock().await.state != "stopped" {
                 return Err(anyhow!("Async run {id} must be stopped before removal"));
             }
-            let detail = job.detail.lock().await.clone();
             jobs().lock().await.remove(&id);
             remove_job_pty(&job);
-            let _ = tokio::fs::remove_file(&detail.result_path).await;
-            let value = json!({ "asyncID": id, "removed": true, "resultPath": detail.result_path });
+            let value = json!({ "asyncID": id, "removed": true });
             Ok(ToolResult {
                 title: "Async run removed".to_string(),
                 metadata: value.clone(),
@@ -193,16 +186,17 @@ async fn input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> 
     }
 
     let detail = job.detail.lock().await.clone();
-    let offset = tokio::fs::metadata(&detail.result_path)
-        .await
-        .map(|meta| meta.len())
-        .unwrap_or(0);
     let (data, source) = input_data(&options, ctx).await?;
+    let wait = options.wait.clone().unwrap_or_else(|| "return".to_string());
+    let output_offset = if wait == "attach" {
+        Some(captured_output_len(&job).await)
+    } else {
+        None
+    };
     if !data.is_empty() {
         job.manager.core().send_to_pty(&detail.async_id, &data)?;
     }
 
-    let wait = options.wait.clone().unwrap_or_else(|| "return".to_string());
     let mut value = json!({
         "asyncID": id,
         "wait": wait,
@@ -210,14 +204,18 @@ async fn input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> 
         "source": source,
     });
     if value["wait"] == "attach" {
-        let tail = attach(
-            &detail.result_path,
-            offset,
+        let (snapshot, attach_meta) = attach(
+            &job,
+            output_offset.unwrap_or_default(),
             options.timeout.unwrap_or(INPUT_TIMEOUT),
-            options.window.unwrap_or(INPUT_WINDOW),
         )
-        .await;
-        merge_json(&mut value, tail);
+        .await?;
+        merge_json(&mut value, attach_meta);
+        return Ok(ToolResult {
+            title: "Async input sent".to_string(),
+            metadata: value.clone(),
+            output: snapshot,
+        });
     }
 
     Ok(ToolResult {
