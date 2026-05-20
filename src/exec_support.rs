@@ -1,16 +1,15 @@
 use crate::exec::ExbashOptions;
-use crate::ToolContext;
+use crate::{ShellManager, ToolContext};
 use anyhow::{anyhow, Result};
+use pty_t_core::CommandSpec;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::time;
 
@@ -43,8 +42,9 @@ pub(crate) struct RunDetail {
 }
 
 pub(crate) struct Job {
-    pub(crate) child: Mutex<Option<Child>>,
     pub(crate) detail: Mutex<RunDetail>,
+    pub(crate) manager: ShellManager,
+    pty: String,
     log: Mutex<tokio::fs::File>,
 }
 
@@ -56,16 +56,10 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         .command
         .clone()
         .ok_or_else(|| anyhow!("command is required"))?;
+    let manager = ctx
+        .shell_manager()
+        .ok_or_else(|| anyhow!("exbash requires a PTY-backed ShellManager"))?;
     let cwd = cwd_for(options, ctx);
-    let mut cmd = shell_command(&command, options.executor.as_deref());
-    cmd.current_dir(&cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let id = next_id();
     let result_path = data_root().join(format!("{id}.log"));
     tokio::fs::create_dir_all(result_path.parent().unwrap()).await?;
@@ -74,10 +68,13 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         .append(true)
         .open(&result_path)
         .await?;
+    let spec = command_spec(&command, options.executor.as_deref(), &cwd);
+    let session = manager.create_pty(id.clone(), spec, None, None)?;
+    let output = session.subscribe_output();
     let detail = RunDetail {
         async_id: id.clone(),
         scope: options.scope.clone().unwrap_or_else(|| "local".to_string()),
-        pid: child.id(),
+        pid: session.process_id(),
         status: "running".to_string(),
         state: "running".to_string(),
         exit_code: None,
@@ -92,13 +89,13 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         error: None,
     };
     let job = Arc::new(Job {
-        child: Mutex::new(Some(child)),
         detail: Mutex::new(detail),
+        manager,
+        pty: id.clone(),
         log: Mutex::new(log),
     });
     jobs().lock().await.insert(id, job.clone());
-    spawn_pipe(stdout, job.clone());
-    spawn_pipe(stderr, job.clone());
+    spawn_output_log(output, job.clone());
     if let Some(timeout) = options.timeout {
         spawn_timeout(job.clone(), timeout);
     }
@@ -109,27 +106,22 @@ pub(crate) async fn refresh_job(job: &Arc<Job>) -> Result<()> {
     if job.detail.lock().await.state == "stopped" {
         return Ok(());
     }
-    let mut child = job.child.lock().await;
-    if let Some(proc) = child.as_mut() {
-        if let Some(status) = proc.try_wait()? {
-            let mut detail = job.detail.lock().await;
-            finish_detail(&mut detail, status.code().unwrap_or(-1), None);
-            *child = None;
-        }
+    if let Some(code) = job.manager.core().try_exit_code(&job.pty)? {
+        let mut detail = job.detail.lock().await;
+        finish_detail(&mut detail, code as i32, None);
     }
     Ok(())
 }
 
 pub(crate) async fn stop_job(job: &Arc<Job>, code: i32, error: Option<String>) -> Result<()> {
-    let mut child = job.child.lock().await;
-    if let Some(proc) = child.as_mut() {
-        let _ = proc.start_kill();
-        let _ = proc.wait().await;
-    }
-    *child = None;
+    let _ = job.manager.core().kill_pty(&job.pty);
     let mut detail = job.detail.lock().await;
     finish_detail(&mut detail, code, error);
     Ok(())
+}
+
+pub(crate) fn remove_job_pty(job: &Arc<Job>) {
+    job.manager.remove_pty(&job.pty);
 }
 
 pub(crate) async fn wait_for_stop(job: &Arc<Job>, timeout: u64) -> bool {
@@ -217,20 +209,11 @@ pub(crate) fn merge_json(target: &mut serde_json::Value, source: serde_json::Val
     }
 }
 
-fn spawn_pipe<T>(stream: Option<T>, job: Arc<Job>)
-where
-    T: AsyncRead + Unpin + Send + 'static,
-{
+fn spawn_output_log(mut output: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, job: Arc<Job>) {
     tokio::spawn(async move {
-        let Some(mut stream) = stream else { return };
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match stream.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            if job.log.lock().await.write_all(&buf[..n]).await.is_ok() {
-                job.detail.lock().await.line_pointer += count_lines(&buf[..n]);
+        while let Some(data) = output.recv().await {
+            if job.log.lock().await.write_all(&data).await.is_ok() {
+                job.detail.lock().await.line_pointer += count_lines(&data);
             }
         }
     });
@@ -253,31 +236,22 @@ fn finish_detail(detail: &mut RunDetail, code: i32, error: Option<String>) {
     detail.error = error;
 }
 
-fn shell_command(command: &str, executor: Option<&str>) -> Command {
+fn command_spec(command: &str, executor: Option<&str>, cwd: &std::path::Path) -> CommandSpec {
     let exec = executor.unwrap_or(default_shell_name());
-    let mut cmd = Command::new(exec);
-    match exec.to_lowercase().as_str() {
-        "powershell" | "pwsh" | "powershell.exe" => {
-            cmd.arg("-NoLogo")
-                .arg("-NoProfile")
-                .arg("-NonInteractive")
-                .arg("-Command")
-                .arg(command);
-        }
-        "cmd" | "cmd.exe" => {
-            cmd.arg("/d").arg("/s").arg("/c").arg(command);
-        }
-        "node" => {
-            cmd.arg("-e").arg(command);
-        }
-        "python" | "python3" => {
-            cmd.arg("-c").arg(command);
-        }
-        _ => {
-            cmd.arg("-lc").arg(command);
-        }
-    }
-    cmd
+    let args = match exec.to_lowercase().as_str() {
+        "powershell" | "pwsh" | "powershell.exe" => vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        "cmd" | "cmd.exe" => vec!["/d", "/s", "/c", command],
+        "node" => vec!["-e", command],
+        "python" | "python3" => vec!["-c", command],
+        _ => vec!["-lc", command],
+    };
+    CommandSpec::new(exec).args(args).cwd(cwd.to_path_buf())
 }
 
 fn cwd_for(options: &ExbashOptions, ctx: &ToolContext) -> PathBuf {

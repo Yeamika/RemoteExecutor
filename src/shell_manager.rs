@@ -58,6 +58,12 @@ impl ShellManager {
         self.core.create_bash(name)
     }
 
+    pub fn remove_pty(&self, pty: &str) -> bool {
+        self.clients.lock().unwrap().remove(pty);
+        self.locked.lock().unwrap().remove(pty);
+        self.core.state().remove_session(pty).is_some()
+    }
+
     pub fn list(&self) -> Vec<SessionSummary> {
         self.core
             .list()

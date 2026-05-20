@@ -1,11 +1,13 @@
+use crate::shell_manager::ShellManager;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub directory: PathBuf,
     pub worktree: PathBuf,
+    shell_manager: Option<ShellManager>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -24,7 +26,17 @@ impl ToolContext {
         Self {
             directory,
             worktree,
+            shell_manager: None,
         }
+    }
+
+    pub fn with_shell_manager(mut self, shell_manager: ShellManager) -> Self {
+        self.shell_manager = Some(shell_manager);
+        self
+    }
+
+    pub fn shell_manager(&self) -> Option<ShellManager> {
+        self.shell_manager.clone()
     }
 
     pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {

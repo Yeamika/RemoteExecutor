@@ -1,13 +1,12 @@
 use crate::exec_support::{
-    attach, clip, description, input_data, jobs, merge_json, refresh_job, start_job, stop_job,
-    wait_for_stop,
+    attach, clip, description, input_data, jobs, merge_json, refresh_job, remove_job_pty,
+    start_job, stop_job, wait_for_stop,
 };
 use crate::{ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
 
 const ASYNC_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
@@ -73,6 +72,7 @@ async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result
             .await
             .unwrap_or_default();
         jobs().lock().await.remove(&detail.async_id);
+        remove_job_pty(&job);
         return Ok(ToolResult {
             title: description.clone(),
             metadata: json!({ "output": clip(&output), "exit": detail.exit_code, "description": description }),
@@ -163,6 +163,7 @@ async fn control(options: ExbashOptions) -> Result<ToolResult> {
             }
             let detail = job.detail.lock().await.clone();
             jobs().lock().await.remove(&id);
+            remove_job_pty(&job);
             let _ = tokio::fs::remove_file(&detail.result_path).await;
             let value = json!({ "asyncID": id, "removed": true, "resultPath": detail.result_path });
             Ok(ToolResult {
@@ -198,15 +199,7 @@ async fn input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> 
         .unwrap_or(0);
     let (data, source) = input_data(&options, ctx).await?;
     if !data.is_empty() {
-        let mut child = job.child.lock().await;
-        let child = child
-            .as_mut()
-            .ok_or_else(|| anyhow!("Async run {id} is not running"))?;
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("Async run {id} is not accepting stdin"))?;
-        stdin.write_all(&data).await?;
+        job.manager.core().send_to_pty(&detail.async_id, &data)?;
     }
 
     let wait = options.wait.clone().unwrap_or_else(|| "return".to_string());

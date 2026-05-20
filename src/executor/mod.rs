@@ -1,7 +1,7 @@
 use crate::{
     apply_diffy, apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, ApplyOptions,
-    DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions, ToolContext,
-    ToolResult,
+    DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions, ShellManager,
+    ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -85,14 +85,18 @@ impl ExecutorResponse {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Executor {
     info: ExecutorInfo,
+    shell_manager: Option<ShellManager>,
 }
 
 impl Executor {
     pub fn new(info: ExecutorInfo) -> Self {
-        Self { info }
+        Self {
+            info,
+            shell_manager: None,
+        }
     }
 
     pub fn local(id: impl Into<String>) -> Self {
@@ -102,17 +106,26 @@ impl Executor {
             device: std::env::var("HOSTNAME").ok(),
             labels: BTreeMap::new(),
         })
+        .with_shell_manager(ShellManager::default_shell(80, 24))
     }
 
     pub fn info(&self) -> &ExecutorInfo {
         &self.info
     }
 
+    pub fn with_shell_manager(mut self, shell_manager: ShellManager) -> Self {
+        self.shell_manager = Some(shell_manager);
+        self
+    }
+
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
         let method = request.method.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
-        let ctx = ToolContext::new(request.directory, request.worktree);
+        let mut ctx = ToolContext::new(request.directory, request.worktree);
+        if let Some(shell_manager) = &self.shell_manager {
+            ctx = ctx.with_shell_manager(shell_manager.clone());
+        }
         let result = if is_exbash_method(&method) {
             dispatch_tool(&method, request.params, &ctx).await
         } else {
@@ -172,6 +185,7 @@ pub fn start_shared_executor_ws(
     std_listener.set_nonblocking(true)?;
     let listener = TcpListener::from_std(std_listener)?;
     let actual_addr = listener.local_addr()?.to_string();
+    let executor = executor.with_shell_manager(manager.clone());
 
     tokio::spawn(async move {
         while let Ok((stream, peer_addr)) = listener.accept().await {
