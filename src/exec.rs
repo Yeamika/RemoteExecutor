@@ -13,7 +13,8 @@ const INPUT_TIMEOUT: u64 = 10_000;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExbashOptions {
-    pub mode: String,
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -21,19 +22,11 @@ pub struct ExbashOptions {
     #[serde(default)]
     pub workdir: Option<PathBuf>,
     #[serde(default)]
-    pub executor: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-    #[serde(default)]
     pub timeout: Option<u64>,
     #[serde(default, rename = "async_timeout")]
     pub async_timeout: Option<u64>,
     #[serde(default, rename = "asyncID")]
     pub async_id: Option<String>,
-    #[serde(default)]
-    pub action: Option<String>,
-    #[serde(default)]
-    pub wait: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default, rename = "filePath")]
@@ -49,13 +42,15 @@ pub struct ExbashOutput {
 }
 
 pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    match options.mode.as_str() {
+    let mode = options.mode.as_deref().unwrap_or("exec_timeout_async");
+    match mode {
         "exec_timeout_async" => exec_timeout_async(options, ctx).await,
         "exec_async" => exec_async(options, ctx).await,
         "list" => list(options).await,
-        "control" => control(options).await,
-        "input" => input(options, ctx).await,
-        _ => Err(anyhow!("unknown exbash mode: {}", options.mode)),
+        "attach" => attach_input(options, ctx).await,
+        "exbash_stop" | "stop" => stop(options).await,
+        "exbash_remove" | "exbasp_remove" | "remove" => remove(options).await,
+        _ => Err(anyhow!("unknown exbash mode: {mode}")),
     }
 }
 
@@ -109,13 +104,6 @@ async fn list(options: ExbashOptions) -> Result<ToolResult> {
         {
             continue;
         }
-        if options
-            .scope
-            .as_deref()
-            .is_some_and(|scope| scope != detail.scope)
-        {
-            continue;
-        }
         runs.push(detail);
     }
     let value = json!({ "runs": runs });
@@ -126,14 +114,11 @@ async fn list(options: ExbashOptions) -> Result<ToolResult> {
     })
 }
 
-async fn control(options: ExbashOptions) -> Result<ToolResult> {
+async fn stop(options: ExbashOptions) -> Result<ToolResult> {
     let id = options
         .async_id
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
-    let action = options
-        .action
-        .ok_or_else(|| anyhow!("action is required"))?;
     let job = jobs()
         .lock()
         .await
@@ -141,35 +126,42 @@ async fn control(options: ExbashOptions) -> Result<ToolResult> {
         .cloned()
         .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
 
-    match action.as_str() {
-        "stop" => {
-            stop_job(&job, 130, None).await?;
-            let detail = job.detail.lock().await.clone();
-            Ok(ToolResult {
-                title: "Async run stopped".to_string(),
-                metadata: serde_json::to_value(&detail)?,
-                output: serde_json::to_string_pretty(&detail)?,
-            })
-        }
-        "remove" => {
-            refresh_job(&job).await?;
-            if job.detail.lock().await.state != "stopped" {
-                return Err(anyhow!("Async run {id} must be stopped before removal"));
-            }
-            jobs().lock().await.remove(&id);
-            remove_job_pty(&job);
-            let value = json!({ "asyncID": id, "removed": true });
-            Ok(ToolResult {
-                title: "Async run removed".to_string(),
-                metadata: value.clone(),
-                output: serde_json::to_string_pretty(&value)?,
-            })
-        }
-        _ => Err(anyhow!("unknown control action: {action}")),
-    }
+    stop_job(&job, 130, None).await?;
+    let detail = job.detail.lock().await.clone();
+    Ok(ToolResult {
+        title: "Async run stopped".to_string(),
+        metadata: serde_json::to_value(&detail)?,
+        output: serde_json::to_string_pretty(&detail)?,
+    })
 }
 
-async fn input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+async fn remove(options: ExbashOptions) -> Result<ToolResult> {
+    let id = options
+        .async_id
+        .clone()
+        .ok_or_else(|| anyhow!("asyncID is required"))?;
+    let job = jobs()
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
+
+    refresh_job(&job).await?;
+    if job.detail.lock().await.state != "stopped" {
+        return Err(anyhow!("Async run {id} must be stopped before removal"));
+    }
+    jobs().lock().await.remove(&id);
+    remove_job_pty(&job);
+    let value = json!({ "asyncID": id, "removed": true });
+    Ok(ToolResult {
+        title: "Async run removed".to_string(),
+        metadata: value.clone(),
+        output: serde_json::to_string_pretty(&value)?,
+    })
+}
+
+async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let id = options
         .async_id
         .clone()
@@ -187,40 +179,26 @@ async fn input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> 
 
     let detail = job.detail.lock().await.clone();
     let (data, source) = input_data(&options, ctx).await?;
-    let wait = options.wait.clone().unwrap_or_else(|| "return".to_string());
-    let output_offset = if wait == "attach" {
-        Some(captured_output_len(&job).await)
-    } else {
-        None
-    };
+    let output_offset = captured_output_len(&job).await;
     if !data.is_empty() {
         job.manager.core().send_to_pty(&detail.async_id, &data)?;
     }
 
     let mut value = json!({
         "asyncID": id,
-        "wait": wait,
         "wrote": data.len(),
         "source": source,
     });
-    if value["wait"] == "attach" {
-        let (snapshot, attach_meta) = attach(
-            &job,
-            output_offset.unwrap_or_default(),
-            options.timeout.unwrap_or(INPUT_TIMEOUT),
-        )
-        .await?;
-        merge_json(&mut value, attach_meta);
-        return Ok(ToolResult {
-            title: "Async input sent".to_string(),
-            metadata: value.clone(),
-            output: snapshot,
-        });
-    }
-
+    let (snapshot, attach_meta) = attach(
+        &job,
+        output_offset,
+        options.timeout.unwrap_or(INPUT_TIMEOUT),
+    )
+    .await?;
+    merge_json(&mut value, attach_meta);
     Ok(ToolResult {
         title: "Async input sent".to_string(),
         metadata: value.clone(),
-        output: serde_json::to_string_pretty(&value)?,
+        output: snapshot,
     })
 }

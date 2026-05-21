@@ -10,7 +10,6 @@ async fn stdio_dispatches_glob() {
         method: "glob".to_string(),
         params: json!({"pattern":"*.rs"}),
         directory: None,
-        worktree: None,
         executor: None,
         tool_timeout_ms: None,
     };
@@ -31,7 +30,6 @@ async fn stdio_dispatches_diffy() {
             "patchText":"--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
         }),
         directory: Some(dir.path().to_path_buf()),
-        worktree: Some(dir.path().to_path_buf()),
         executor: None,
         tool_timeout_ms: None,
     };

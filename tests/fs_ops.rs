@@ -11,10 +11,7 @@ fn glob_paths_uses_pattern_matching() {
     fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
     fs::write(dir.path().join("b.txt"), "hello\n").unwrap();
 
-    let ctx = ToolContext::new(
-        Some(dir.path().to_path_buf()),
-        Some(dir.path().to_path_buf()),
-    );
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
     let output = glob_paths(
         GlobOptions {
             pattern: "*.rs".to_string(),
@@ -34,10 +31,7 @@ fn read_path_reads_file_with_lines() {
     let path = dir.path().join("sample.txt");
     fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let ctx = ToolContext::new(
-        Some(dir.path().to_path_buf()),
-        Some(dir.path().to_path_buf()),
-    );
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
     let output = read_path(
         ReadOptions {
             file_path: path.clone(),
@@ -62,10 +56,7 @@ async fn apply_patch_can_apply_patch() {
         path.display()
     );
 
-    let ctx = ToolContext::new(
-        Some(dir.path().to_path_buf()),
-        Some(dir.path().to_path_buf()),
-    );
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
     apply_patch(ApplyOptions { patch_text: patch }, &ctx)
         .await
         .unwrap();
@@ -80,10 +71,7 @@ async fn diffy_can_apply_unified_diff() {
     fs::write(&path, "before\n").unwrap();
 
     let patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n";
-    let ctx = ToolContext::new(
-        Some(dir.path().to_path_buf()),
-        Some(dir.path().to_path_buf()),
-    );
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
 
     apply_diffy(
         DiffOptions {

@@ -15,7 +15,6 @@ async fn executor_applies_tool_timeout_to_small_tools() {
             method: "grep".to_string(),
             params: json!({"pattern":"needle"}),
             directory: Some(dir.path().to_path_buf()),
-            worktree: Some(dir.path().to_path_buf()),
             executor: None,
             tool_timeout_ms: Some(0),
         })
@@ -32,13 +31,11 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
             id: json!(2),
             method: "exbash".to_string(),
             params: json!({
-                "mode":"exec_timeout_async",
                 "command":"echo hi",
                 "description":"timeout smoke",
                 "async_timeout":2000
             }),
             directory: None,
-            worktree: None,
             executor: None,
             tool_timeout_ms: Some(0),
         })
@@ -61,13 +58,11 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
             id: json!(3),
             method: "exbash".to_string(),
             params: json!({
-                "mode":"exec_timeout_async",
                 "command": command,
                 "description":"snapshot attach",
                 "async_timeout":0
             }),
             directory: None,
-            worktree: None,
             executor: None,
             tool_timeout_ms: None,
         })
@@ -82,16 +77,13 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(4),
-            method: "exbash".to_string(),
+            method: "exbash_attach".to_string(),
             params: json!({
-                "mode":"input",
                 "asyncID": async_id,
                 "text":"hello snapshot\n",
-                "wait":"attach",
                 "timeout":100
             }),
             directory: None,
-            worktree: None,
             executor: None,
             tool_timeout_ms: None,
         })
@@ -109,10 +101,9 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(5),
-            method: "exbash".to_string(),
-            params: json!({"mode":"control","asyncID":async_id.clone(),"action":"stop"}),
+            method: "exbash_stop".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
             directory: None,
-            worktree: None,
             executor: None,
             tool_timeout_ms: None,
         })
@@ -122,10 +113,9 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(6),
-            method: "exbash".to_string(),
-            params: json!({"mode":"control","asyncID":async_id,"action":"remove"}),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
             directory: None,
-            worktree: None,
             executor: None,
             tool_timeout_ms: None,
         })

@@ -4,7 +4,7 @@ Remote execution building blocks backed by the vendored `pty-t` submodule.
 
 Modules:
 
-- `Executor`: WS execution node for `read`, `glob`, `grep`, `apply_patch`, `diffy`, and `exbash`.
+- `Executor`: WS execution node for file tools, patch tools, and PTY-backed exbash tools.
 - `Caller`: stdio/tool front door that manages multiple Executors.
 - `ShellManager`: controlled PTY/session manager with a `ptyt`-compatible WebSocket endpoint.
 - `fs_ops`: opencode-style `glob`, `grep`, and `read` helpers. Search is backed by ripgrep crates, not an external `rg` binary.
@@ -42,7 +42,7 @@ cargo run --bin remote-caller-mcp
 
 The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`.
 The MCP wrapper speaks JSON-RPC over stdio and exposes the same Caller/Executor tools through `tools/list` and `tools/call`.
-Small tools (`read`, `glob`, `grep`, `apply_patch`, `diffy`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. `exbash` is handled separately through its own timeout fields and runs on the same PTY backend as terminal sessions.
+Small tools (`read`, `glob`, `grep`, `apply_patch`, `diffy`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
 
 Patch tools:
 
@@ -55,10 +55,18 @@ Caller tools:
 - `connect_to_executor`
 - `set_default_executor`
 
+Exbash tools:
+
+- `exbash`: start a command, defaulting to `exec_timeout_async` behavior.
+- `exbash_list`: list runs.
+- `exbash_attach`: write text or file input, wait until `timeout`, and return a PTY snapshot.
+- `exbash_stop`: stop a run.
+- `exbash_remove`: remove a stopped run.
+
 Executors are addressed over WebSocket. The built-in `local` executor is started automatically by `Caller`.
 MCP calls can route to a specific Executor with the optional `targetExecutor` argument.
 Caller-to-Executor connection/response timeout is an internal fixed default of `30000ms` and is not exposed as a tool argument.
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.
 Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocket, so `ptyt`/`ptyc` clients can list and attach to them by `asyncID`.
-`exbash input` with `wait=attach` waits until its `timeout` elapses, then returns the current PTY window snapshot as `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It no longer writes log files or accepts a `window` tail-size argument.
+`exbash_attach` waits until its `timeout` elapses, then returns the current PTY window snapshot as `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It does not write log files or accept a tail-size argument.

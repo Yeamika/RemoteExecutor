@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub struct ToolContext {
     pub directory: PathBuf,
-    pub worktree: PathBuf,
     shell_manager: Option<ShellManager>,
 }
 
@@ -18,14 +17,12 @@ pub struct ToolResult {
 }
 
 impl ToolContext {
-    pub fn new(directory: Option<PathBuf>, worktree: Option<PathBuf>) -> Self {
+    pub fn new(directory: Option<PathBuf>) -> Self {
         let directory = directory
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let worktree = worktree.unwrap_or_else(|| directory.clone());
         Self {
             directory,
-            worktree,
             shell_manager: None,
         }
     }
@@ -49,7 +46,7 @@ impl ToolContext {
     }
 
     pub fn title(&self, path: &Path) -> String {
-        path.strip_prefix(&self.worktree)
+        path.strip_prefix(&self.directory)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/")

@@ -39,8 +39,6 @@ pub struct ExecutorRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
     #[serde(
         default,
@@ -122,7 +120,7 @@ impl Executor {
         let id = request.id.clone();
         let method = request.method.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
-        let mut ctx = ToolContext::new(request.directory, request.worktree);
+        let mut ctx = ToolContext::new(request.directory);
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }
@@ -284,12 +282,41 @@ fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
 }
 
 fn is_exbash_method(method: &str) -> bool {
-    matches!(method, "exbash" | "exec")
+    matches!(
+        method,
+        "exbash"
+            | "exec"
+            | "exbash_list"
+            | "exbash_attach"
+            | "exbash_stop"
+            | "exbash_remove"
+            | "exbasp_remove"
+    )
 }
 
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {
     match method {
         "exbash" | "exec" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
+        "exbash_list" => {
+            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
+            options.mode = Some("list".to_string());
+            exbash(options, ctx).await
+        }
+        "exbash_attach" => {
+            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
+            options.mode = Some("attach".to_string());
+            exbash(options, ctx).await
+        }
+        "exbash_stop" => {
+            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
+            options.mode = Some("exbash_stop".to_string());
+            exbash(options, ctx).await
+        }
+        "exbash_remove" | "exbasp_remove" => {
+            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
+            options.mode = Some("exbash_remove".to_string());
+            exbash(options, ctx).await
+        }
         "glob" => glob_paths(serde_json::from_value::<GlobOptions>(params)?, ctx),
         "grep" => grep_paths(serde_json::from_value::<GrepOptions>(params)?, ctx).await,
         "read" => read_path(serde_json::from_value::<ReadOptions>(params)?, ctx),

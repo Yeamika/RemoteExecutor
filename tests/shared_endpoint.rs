@@ -25,7 +25,6 @@ async fn shared_endpoint_accepts_tool_and_pty_protocols() {
         method: "read".to_string(),
         params: json!({"filePath":"file.txt"}),
         directory: Some(dir.path().to_path_buf()),
-        worktree: Some(dir.path().to_path_buf()),
         executor: None,
         tool_timeout_ms: None,
     };
@@ -66,13 +65,10 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
     let addr =
         start_shared_executor_ws("127.0.0.1:0", Executor::local("shared-exbash"), manager).unwrap();
     let url = format!("ws://{addr}");
-    let (command, executor) = if cfg!(windows) {
-        (
-            "Write-Output visible; Start-Sleep -Seconds 1",
-            "powershell.exe",
-        )
+    let command = if cfg!(windows) {
+        "Write-Output visible; Start-Sleep -Seconds 1"
     } else {
-        ("printf visible; sleep 1", "bash")
+        "printf visible; sleep 1"
     };
 
     let (mut tool_ws, _) = connect_async(&url).await.unwrap();
@@ -80,14 +76,11 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
         id: json!(10),
         method: "exbash".to_string(),
         params: json!({
-            "mode":"exec_timeout_async",
             "command": command,
-            "executor": executor,
             "description":"visible pty exbash",
             "async_timeout":0
         }),
         directory: None,
-        worktree: None,
         executor: None,
         tool_timeout_ms: None,
     };
@@ -125,10 +118,9 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
 
     let stop = ExecutorRequest {
         id: json!(11),
-        method: "exbash".to_string(),
-        params: json!({"mode":"control","asyncID":async_id.clone(),"action":"stop"}),
+        method: "exbash_stop".to_string(),
+        params: json!({"asyncID":async_id.clone()}),
         directory: None,
-        worktree: None,
         executor: None,
         tool_timeout_ms: None,
     };
@@ -140,10 +132,9 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
 
     let remove = ExecutorRequest {
         id: json!(12),
-        method: "exbash".to_string(),
-        params: json!({"mode":"control","asyncID":async_id,"action":"remove"}),
+        method: "exbash_remove".to_string(),
+        params: json!({"asyncID":async_id}),
         directory: None,
-        worktree: None,
         executor: None,
         tool_timeout_ms: None,
     };

@@ -92,14 +92,12 @@ fn request_from_tool_call(id: Value, name: &str, arguments: Value) -> ExecutorRe
     let tool_timeout_ms =
         take_u64(&mut params, "toolTimeoutMs").or_else(|| take_u64(&mut params, "tool_timeout_ms"));
     let directory = take_path(&mut params, "directory");
-    let worktree = take_path(&mut params, "worktree");
 
     ExecutorRequest {
         id,
         method: name.to_string(),
         params: Value::Object(params),
         directory,
-        worktree,
         executor,
         tool_timeout_ms,
     }
@@ -225,8 +223,45 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "exbash",
-            "Run shell commands with sync/async modes",
-            exbash_schema(),
+            "Run a shell command; detaches if it exceeds async_timeout",
+            schema(
+                &["command"],
+                &[
+                    prop("command", "string"),
+                    prop("description", "string"),
+                    prop("workdir", "string"),
+                    prop("timeout", "number"),
+                    prop("async_timeout", "number"),
+                ],
+            ),
+        ),
+        tool(
+            "exbash_list",
+            "List exbash runs",
+            schema(&[], &[prop("asyncID", "string")]),
+        ),
+        tool(
+            "exbash_attach",
+            "Write input and return a PTY snapshot after timeout",
+            schema(
+                &["asyncID"],
+                &[
+                    prop("asyncID", "string"),
+                    prop("text", "string"),
+                    prop("filePath", "string"),
+                    prop("timeout", "number"),
+                ],
+            ),
+        ),
+        tool(
+            "exbash_stop",
+            "Stop an exbash run",
+            schema(&["asyncID"], &[prop("asyncID", "string")]),
+        ),
+        tool(
+            "exbash_remove",
+            "Remove a stopped exbash run",
+            schema(&["asyncID"], &[prop("asyncID", "string")]),
         ),
         tool(
             "rg",
@@ -299,32 +334,6 @@ fn add_routing(mut schema: Value) -> Value {
         return schema;
     };
     properties.insert("targetExecutor".to_string(), json!({ "type": "string" }));
-    properties.insert(
-        "toolTimeoutMs".to_string(),
-        json!({ "type": "number", "maximum": 600000 }),
-    );
     properties.insert("directory".to_string(), json!({ "type": "string" }));
-    properties.insert("worktree".to_string(), json!({ "type": "string" }));
     schema
-}
-
-fn exbash_schema() -> Value {
-    schema(
-        &["mode"],
-        &[
-            prop("mode", "string"),
-            prop("command", "string"),
-            prop("description", "string"),
-            prop("workdir", "string"),
-            prop("executor", "string"),
-            prop("scope", "string"),
-            prop("timeout", "number"),
-            prop("async_timeout", "number"),
-            prop("asyncID", "string"),
-            prop("action", "string"),
-            prop("wait", "string"),
-            prop("text", "string"),
-            prop("filePath", "string"),
-        ],
-    )
 }

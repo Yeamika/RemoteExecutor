@@ -31,7 +31,7 @@ async fn mcp_initialize_and_lists_tools() {
         .any(|tool| tool["name"] == "connect_to_executor"));
     let read = tools.iter().find(|tool| tool["name"] == "read").unwrap();
     let properties = &read["inputSchema"]["properties"];
-    assert!(properties.get("toolTimeoutMs").is_some());
+    assert!(properties.get("targetExecutor").is_some());
     assert!(properties.get("callTimeoutMs").is_none());
 }
 
@@ -52,8 +52,7 @@ async fn mcp_calls_caller_tool_over_stdio_shape() {
                 "name":"read",
                 "arguments":{
                     "filePath":"file.txt",
-                    "directory":dir_text.clone(),
-                    "worktree":dir_text
+                    "directory":dir_text
                 }
             }
         }),

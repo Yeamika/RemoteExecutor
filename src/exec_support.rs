@@ -19,7 +19,6 @@ const CAPTURE_LIMIT: usize = 1024 * 1024;
 pub(crate) struct RunDetail {
     #[serde(rename = "asyncID")]
     pub(crate) async_id: String,
-    pub(crate) scope: String,
     pub(crate) pid: Option<u32>,
     pub(crate) status: String,
     pub(crate) state: String,
@@ -59,12 +58,11 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         .ok_or_else(|| anyhow!("exbash requires a PTY-backed ShellManager"))?;
     let cwd = cwd_for(options, ctx);
     let id = next_id();
-    let spec = command_spec(&command, options.executor.as_deref(), &cwd);
+    let spec = command_spec(&command, &cwd);
     let session = manager.create_pty(id.clone(), spec, None, None)?;
     let output = session.subscribe_output();
     let detail = RunDetail {
         async_id: id.clone(),
-        scope: options.scope.clone().unwrap_or_else(|| "local".to_string()),
         pid: session.process_id(),
         status: "running".to_string(),
         state: "running".to_string(),
@@ -175,7 +173,8 @@ pub(crate) fn description(options: &ExbashOptions) -> String {
         options
             .command
             .clone()
-            .unwrap_or_else(|| options.mode.clone())
+            .or_else(|| options.mode.clone())
+            .unwrap_or_else(|| "exbash".to_string())
     })
 }
 
@@ -228,8 +227,8 @@ fn finish_detail(detail: &mut RunDetail, code: i32, error: Option<String>) {
     detail.error = error;
 }
 
-fn command_spec(command: &str, executor: Option<&str>, cwd: &std::path::Path) -> CommandSpec {
-    let exec = executor.unwrap_or(default_shell_name());
+fn command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
+    let exec = default_shell_name();
     let args = match exec.to_lowercase().as_str() {
         "powershell" | "pwsh" | "powershell.exe" => vec![
             "-NoLogo",
