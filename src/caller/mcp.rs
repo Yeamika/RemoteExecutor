@@ -296,7 +296,7 @@ fn tools() -> Vec<Value> {
                     prop("read_timeout", "number"),
                 ],
             ),
-            true,
+            false,
         ),
         executor_tool(
             "exbash_stop",
