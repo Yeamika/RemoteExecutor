@@ -1,7 +1,8 @@
 mod mcp;
 
 use crate::{
-    start_executor_ws, Executor, ExecutorInfo, ExecutorRequest, ExecutorResponse, ToolResult,
+    start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest, ExecutorResponse,
+    ShellManager, ToolResult,
 };
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -59,9 +60,11 @@ struct ExecutorEndpoint {
 
 impl Caller {
     pub async fn new() -> Result<Self> {
-        let local = Executor::local("local");
+        let shell_manager = ShellManager::default_shell(80, 24);
+        shell_manager.create_bash("main")?;
+        let local = Executor::local("local").with_shell_manager(shell_manager.clone());
         let local_info = local.info().clone();
-        let local_addr = start_executor_ws("127.0.0.1:0", local)?;
+        let local_addr = start_shared_executor_ws("127.0.0.1:0", local, shell_manager)?;
         let local_endpoint = ExecutorEndpoint {
             info: local_info,
             url: format!("ws://{local_addr}"),

@@ -16,8 +16,8 @@ pub use caller::{
 };
 pub use exec::{exbash, ExbashOptions, ExbashOutput};
 pub use executor::{
-    dispatch_tool, start_executor_ws, start_shared_executor_ws, Executor, ExecutorInfo,
-    ExecutorRequest, ExecutorResponse,
+    dispatch_tool, start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest,
+    ExecutorResponse,
 };
 pub use fs_ops::{glob_paths, grep_paths, read_path, GlobOptions, GrepOptions, ReadOptions};
 pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
