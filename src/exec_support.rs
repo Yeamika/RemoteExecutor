@@ -1,19 +1,16 @@
 use crate::exec::ExbashOptions;
 use crate::{ShellManager, ToolContext};
 use anyhow::{anyhow, Result};
-use pty_t_core::CommandSpec;
+use pty_t_core::{CommandSpec, SessionDetail};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::time;
 
 const OUTPUT_LIMIT: usize = 30_000;
-const CAPTURE_LIMIT: usize = 1024 * 1024;
+const EXBASH_PREFIX: &str = "rex-";
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RunDetail {
@@ -38,92 +35,146 @@ pub(crate) struct RunDetail {
     pub(crate) error: Option<String>,
 }
 
-pub(crate) struct Job {
-    pub(crate) detail: Mutex<RunDetail>,
+pub(crate) struct StartedJob {
     pub(crate) manager: ShellManager,
-    pty: String,
-    output: Mutex<Vec<u8>>,
+    pub(crate) async_id: String,
+    pub(crate) description: String,
+    pub(crate) timeout: Option<u64>,
+    output: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
-static JOBS: OnceLock<Mutex<HashMap<String, Arc<Job>>>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Result<Arc<Job>> {
+pub(crate) fn manager(ctx: &ToolContext) -> Result<ShellManager> {
+    ctx.shell_manager()
+        .ok_or_else(|| anyhow!("exbash requires a PTY-backed ShellManager"))
+}
+
+pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Result<StartedJob> {
     let command = options
         .command
         .clone()
         .ok_or_else(|| anyhow!("command is required"))?;
-    let manager = ctx
-        .shell_manager()
-        .ok_or_else(|| anyhow!("exbash requires a PTY-backed ShellManager"))?;
-    let cwd = cwd_for(options, ctx);
+    let manager = manager(ctx)?;
+    let cwd = ctx.directory.clone();
     let id = next_id();
-    let spec = command_spec(&command, &cwd);
-    let session = manager.create_pty(id.clone(), spec, None, None)?;
+    let session = manager.create_pty(id.clone(), command_spec(&command, &cwd), None, None)?;
     let output = session.subscribe_output();
-    let detail = RunDetail {
-        async_id: id.clone(),
-        pid: session.process_id(),
-        status: "running".to_string(),
-        state: "running".to_string(),
-        exit_code: None,
-        line_pointer: 0,
-        command,
-        description: description(options),
-        cwd: cwd.to_string_lossy().into_owned(),
-        timeout: options.timeout,
-        started_at: now_ms(),
-        ended_at: None,
-        error: None,
-    };
-    let job = Arc::new(Job {
-        detail: Mutex::new(detail),
-        manager,
-        pty: id.clone(),
-        output: Mutex::new(Vec::new()),
-    });
-    jobs().lock().await.insert(id, job.clone());
-    spawn_output_capture(output, job.clone());
+
     if let Some(timeout) = options.timeout {
-        spawn_timeout(job.clone(), timeout);
+        spawn_timeout(manager.clone(), id.clone(), timeout);
     }
-    Ok(job)
+
+    Ok(StartedJob {
+        manager,
+        async_id: id,
+        description: description(options),
+        timeout: options.timeout,
+        output,
+    })
 }
 
-pub(crate) async fn refresh_job(job: &Arc<Job>) -> Result<()> {
-    if job.detail.lock().await.state == "stopped" {
-        return Ok(());
-    }
-    if let Some(code) = job.manager.core().try_exit_code(&job.pty)? {
-        let mut detail = job.detail.lock().await;
-        finish_detail(&mut detail, code as i32, None);
-    }
-    Ok(())
-}
+pub(crate) async fn wait_for_stop_with_output(
+    job: &mut StartedJob,
+    timeout: u64,
+) -> Result<Option<(RunDetail, String)>> {
+    let deadline = time::Instant::now() + Duration::from_millis(timeout);
+    let mut output = Vec::new();
 
-pub(crate) async fn stop_job(job: &Arc<Job>, code: i32, error: Option<String>) -> Result<()> {
-    let _ = job.manager.core().kill_pty(&job.pty);
-    let mut detail = job.detail.lock().await;
-    finish_detail(&mut detail, code, error);
-    Ok(())
-}
-
-pub(crate) fn remove_job_pty(job: &Arc<Job>) {
-    job.manager.remove_pty(&job.pty);
-}
-
-pub(crate) async fn wait_for_stop(job: &Arc<Job>, timeout: u64) -> bool {
-    let end = now_ms() + u128::from(timeout);
     loop {
-        let _ = refresh_job(job).await;
-        if job.detail.lock().await.state == "stopped" {
-            return true;
+        drain_output(&mut job.output, &mut output);
+        if job.manager.core().try_exit_code(&job.async_id)?.is_some() {
+            drain_output(&mut job.output, &mut output);
+            let detail = run_detail(
+                &job.manager,
+                &job.async_id,
+                Some(job.description.clone()),
+                job.timeout,
+            )?;
+            return Ok(Some((
+                detail,
+                String::from_utf8_lossy(&output).into_owned(),
+            )));
         }
-        if now_ms() >= end {
-            return false;
+
+        let now = time::Instant::now();
+        if now >= deadline {
+            drain_output(&mut job.output, &mut output);
+            return Ok(None);
         }
-        time::sleep(Duration::from_millis(50)).await;
+        time::sleep((deadline - now).min(Duration::from_millis(20))).await;
     }
+}
+
+pub(crate) fn run_detail(
+    manager: &ShellManager,
+    async_id: &str,
+    description_override: Option<String>,
+    timeout: Option<u64>,
+) -> Result<RunDetail> {
+    let detail = manager.core().detail(async_id)?;
+    Ok(run_detail_from_session(
+        detail,
+        description_override,
+        timeout,
+    ))
+}
+
+pub(crate) fn list_run_details(
+    manager: &ShellManager,
+    filter: Option<&str>,
+) -> Result<Vec<RunDetail>> {
+    let mut runs = Vec::new();
+    for summary in manager.core().list() {
+        if !summary.pty.starts_with(EXBASH_PREFIX) {
+            continue;
+        }
+        if filter.is_some_and(|id| id != summary.pty) {
+            continue;
+        }
+        runs.push(run_detail(manager, &summary.pty, None, None)?);
+    }
+    Ok(runs)
+}
+
+pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<RunDetail> {
+    let session = manager
+        .core()
+        .session(async_id)
+        .ok_or_else(|| anyhow!("Async run not found: {async_id}"))?;
+    session.kill()?;
+    let _ = manager
+        .core()
+        .wait_exit_code_timeout(async_id, Duration::from_millis(500))
+        .await?;
+    run_detail(manager, async_id, None, None)
+}
+
+pub(crate) fn remove_run(manager: &ShellManager, async_id: &str) -> Result<serde_json::Value> {
+    let detail = manager.core().detail(async_id)?;
+    if detail.exit_code.is_none() {
+        return Err(anyhow!(
+            "Async run {async_id} must be stopped before removal"
+        ));
+    }
+    manager.remove_pty(async_id);
+    Ok(json!({ "asyncID": async_id, "removed": true }))
+}
+
+pub(crate) async fn attach(
+    manager: &ShellManager,
+    async_id: &str,
+    output_offset: usize,
+    timeout: u64,
+) -> Result<(String, serde_json::Value)> {
+    time::sleep(Duration::from_millis(timeout)).await;
+    let snapshot = String::from_utf8_lossy(&manager.snapshot(async_id)?).into_owned();
+    let output_bytes = manager
+        .core()
+        .detail(async_id)?
+        .output_history_bytes
+        .saturating_sub(output_offset);
+    Ok((snapshot, json!({ "outputBytes": output_bytes })))
 }
 
 pub(crate) async fn input_data(
@@ -131,9 +182,7 @@ pub(crate) async fn input_data(
     ctx: &ToolContext,
 ) -> Result<(Vec<u8>, &'static str)> {
     if options.text.is_some() && options.file_path.is_some() {
-        return Err(anyhow!(
-            "Provide only one of text or filePath for input mode."
-        ));
+        return Err(anyhow!("Provide only one of text or filePath for attach."));
     }
     if let Some(text) = &options.text {
         return Ok((text.as_bytes().to_vec(), "text"));
@@ -142,30 +191,6 @@ pub(crate) async fn input_data(
         return Ok((tokio::fs::read(ctx.resolve(path)).await?, "file"));
     }
     Ok((Vec::new(), "attach"))
-}
-
-pub(crate) async fn attach(
-    job: &Arc<Job>,
-    output_offset: usize,
-    timeout: u64,
-) -> Result<(String, serde_json::Value)> {
-    time::sleep(Duration::from_millis(timeout)).await;
-    refresh_job(job).await?;
-    let snapshot = String::from_utf8_lossy(&job.manager.snapshot(&job.pty)?).into_owned();
-    let output_bytes = captured_output_len(job).await.saturating_sub(output_offset);
-    Ok((snapshot, json!({ "outputBytes": output_bytes })))
-}
-
-pub(crate) async fn captured_output(job: &Arc<Job>) -> String {
-    String::from_utf8_lossy(&job.output.lock().await).into_owned()
-}
-
-pub(crate) async fn captured_output_len(job: &Arc<Job>) -> usize {
-    job.output.lock().await.len()
-}
-
-pub(crate) fn jobs() -> &'static Mutex<HashMap<String, Arc<Job>>> {
-    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub(crate) fn description(options: &ExbashOptions) -> String {
@@ -194,37 +219,60 @@ pub(crate) fn merge_json(target: &mut serde_json::Value, source: serde_json::Val
     }
 }
 
-fn spawn_output_capture(mut output: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, job: Arc<Job>) {
-    tokio::spawn(async move {
-        while let Some(data) = output.recv().await {
-            {
-                let mut captured = job.output.lock().await;
-                captured.extend(&data);
-                if captured.len() > CAPTURE_LIMIT {
-                    let remove = captured.len() - CAPTURE_LIMIT;
-                    captured.drain(..remove);
-                }
-            }
-            job.detail.lock().await.line_pointer += count_lines(&data);
-        }
-    });
+fn run_detail_from_session(
+    detail: SessionDetail,
+    description_override: Option<String>,
+    timeout: Option<u64>,
+) -> RunDetail {
+    let command = detail.command.join(" ");
+    let exit_code = detail.exit_code.map(|code| code as i32);
+    let state = if exit_code.is_some() {
+        "stopped"
+    } else {
+        "running"
+    }
+    .to_string();
+    let status = exit_code
+        .map(|code| format!("stopped (exit {code})"))
+        .unwrap_or_else(|| "running".to_string());
+    RunDetail {
+        async_id: detail.pty,
+        pid: detail.process_id,
+        status,
+        state,
+        exit_code,
+        line_pointer: detail.output_history_bytes,
+        command: command.clone(),
+        description: description_override.unwrap_or(command),
+        cwd: detail.cwd.unwrap_or_default(),
+        timeout,
+        started_at: u128::from(detail.created_at),
+        ended_at: exit_code.map(|_| now_ms()),
+        error: None,
+    }
 }
 
-fn spawn_timeout(job: Arc<Job>, timeout: u64) {
+fn drain_output(rx: &mut mpsc::UnboundedReceiver<Vec<u8>>, output: &mut Vec<u8>) {
+    while let Ok(chunk) = rx.try_recv() {
+        output.extend(chunk);
+    }
+}
+
+fn spawn_timeout(manager: ShellManager, async_id: String, timeout: u64) {
     tokio::spawn(async move {
         time::sleep(Duration::from_millis(timeout)).await;
-        if job.detail.lock().await.state == "running" {
-            let _ = stop_job(&job, 124, Some("timeout".to_string())).await;
+        if manager
+            .core()
+            .try_exit_code(&async_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            if let Some(session) = manager.core().session(&async_id) {
+                let _ = session.kill();
+            }
         }
     });
-}
-
-fn finish_detail(detail: &mut RunDetail, code: i32, error: Option<String>) {
-    detail.state = "stopped".to_string();
-    detail.status = format!("stopped (exit {code})");
-    detail.exit_code = Some(code);
-    detail.ended_at = Some(now_ms());
-    detail.error = error;
 }
 
 fn command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
@@ -245,13 +293,10 @@ fn command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
     CommandSpec::new(exec).args(args).cwd(cwd.to_path_buf())
 }
 
-fn cwd_for(_options: &ExbashOptions, ctx: &ToolContext) -> PathBuf {
-    ctx.directory.clone()
-}
-
 fn next_id() -> String {
     format!(
-        "rex-{}-{}",
+        "{}{}-{}",
+        EXBASH_PREFIX,
         now_ms(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     )
@@ -263,10 +308,6 @@ fn default_shell_name() -> &'static str {
     } else {
         "bash"
     }
-}
-
-fn count_lines(bytes: &[u8]) -> usize {
-    bytes.iter().filter(|byte| **byte == b'\n').count()
 }
 
 fn now_ms() -> u128 {

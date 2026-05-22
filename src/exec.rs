@@ -1,6 +1,6 @@
 use crate::exec_support::{
-    attach, captured_output, captured_output_len, clip, description, input_data, jobs, merge_json,
-    refresh_job, remove_job_pty, start_job, stop_job, wait_for_stop,
+    attach, clip, description, input_data, list_run_details, manager, merge_json, remove_run,
+    run_detail, start_job, stop_run, wait_for_stop_with_output,
 };
 use crate::{ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
@@ -44,10 +44,10 @@ pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRes
     match mode {
         "exec_timeout_async" => exec_timeout_async(options, ctx).await,
         "exec_async" => exec_async(options, ctx).await,
-        "list" => list(options).await,
+        "list" => list(options, ctx).await,
         "attach" => attach_input(options, ctx).await,
-        "exbash_stop" | "stop" => stop(options).await,
-        "exbash_remove" | "exbasp_remove" | "remove" => remove(options).await,
+        "exbash_stop" | "stop" => stop(options, ctx).await,
+        "exbash_remove" | "exbasp_remove" | "remove" => remove(options, ctx).await,
         _ => Err(anyhow!("unknown exbash mode: {mode}")),
     }
 }
@@ -55,12 +55,9 @@ pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRes
 async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let async_timeout = options.async_timeout.unwrap_or(ASYNC_TIMEOUT);
     let description = description(&options);
-    let job = start_job(&options, ctx).await?;
-    if wait_for_stop(&job, async_timeout).await {
-        let detail = job.detail.lock().await.clone();
-        let output = captured_output(&job).await;
-        jobs().lock().await.remove(&detail.async_id);
-        remove_job_pty(&job);
+    let mut job = start_job(&options, ctx).await?;
+    if let Some((detail, output)) = wait_for_stop_with_output(&mut job, async_timeout).await? {
+        job.manager.remove_pty(&job.async_id);
         return Ok(ToolResult {
             title: description.clone(),
             metadata: json!({ "output": clip(&output), "exit": detail.exit_code, "description": description }),
@@ -68,7 +65,12 @@ async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result
         });
     }
 
-    let detail = job.detail.lock().await.clone();
+    let detail = run_detail(
+        &job.manager,
+        &job.async_id,
+        Some(job.description.clone()),
+        job.timeout,
+    )?;
     let mut value = serde_json::to_value(&detail)?;
     value["detached"] = json!(true);
     value["asyncTimeout"] = json!(async_timeout);
@@ -81,7 +83,12 @@ async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result
 
 async fn exec_async(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let job = start_job(&options, ctx).await?;
-    let detail = job.detail.lock().await.clone();
+    let detail = run_detail(
+        &job.manager,
+        &job.async_id,
+        Some(job.description),
+        job.timeout,
+    )?;
     Ok(ToolResult {
         title: detail.description.clone(),
         metadata: serde_json::to_value(&detail)?,
@@ -89,21 +96,9 @@ async fn exec_async(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRes
     })
 }
 
-async fn list(options: ExbashOptions) -> Result<ToolResult> {
-    let jobs_snapshot = jobs().lock().await.values().cloned().collect::<Vec<_>>();
-    let mut runs = Vec::new();
-    for job in jobs_snapshot {
-        refresh_job(&job).await?;
-        let detail = job.detail.lock().await.clone();
-        if options
-            .async_id
-            .as_deref()
-            .is_some_and(|id| id != detail.async_id)
-        {
-            continue;
-        }
-        runs.push(detail);
-    }
+async fn list(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    let manager = manager(ctx)?;
+    let runs = list_run_details(&manager, options.async_id.as_deref())?;
     let value = json!({ "runs": runs });
     Ok(ToolResult {
         title: "Async runs listed".to_string(),
@@ -112,20 +107,13 @@ async fn list(options: ExbashOptions) -> Result<ToolResult> {
     })
 }
 
-async fn stop(options: ExbashOptions) -> Result<ToolResult> {
+async fn stop(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let id = options
         .async_id
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
-    let job = jobs()
-        .lock()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
-
-    stop_job(&job, 130, None).await?;
-    let detail = job.detail.lock().await.clone();
+    let manager = manager(ctx)?;
+    let detail = stop_run(&manager, &id).await?;
     Ok(ToolResult {
         title: "Async run stopped".to_string(),
         metadata: serde_json::to_value(&detail)?,
@@ -133,25 +121,13 @@ async fn stop(options: ExbashOptions) -> Result<ToolResult> {
     })
 }
 
-async fn remove(options: ExbashOptions) -> Result<ToolResult> {
+async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let id = options
         .async_id
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
-    let job = jobs()
-        .lock()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
-
-    refresh_job(&job).await?;
-    if job.detail.lock().await.state != "stopped" {
-        return Err(anyhow!("Async run {id} must be stopped before removal"));
-    }
-    jobs().lock().await.remove(&id);
-    remove_job_pty(&job);
-    let value = json!({ "asyncID": id, "removed": true });
+    let manager = manager(ctx)?;
+    let value = remove_run(&manager, &id)?;
     Ok(ToolResult {
         title: "Async run removed".to_string(),
         metadata: value.clone(),
@@ -164,22 +140,16 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         .async_id
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
-    let job = jobs()
-        .lock()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
-    refresh_job(&job).await?;
-    if job.detail.lock().await.state != "running" {
+    let manager = manager(ctx)?;
+    let detail = manager.core().detail(&id)?;
+    if detail.exit_code.is_some() {
         return Err(anyhow!("Async run {id} is not running"));
     }
 
-    let detail = job.detail.lock().await.clone();
     let (data, source) = input_data(&options, ctx).await?;
-    let output_offset = captured_output_len(&job).await;
+    let output_offset = detail.output_history_bytes;
     if !data.is_empty() {
-        job.manager.core().send_to_pty(&detail.async_id, &data)?;
+        manager.core().send_to_pty(&id, &data)?;
     }
 
     let mut value = json!({
@@ -188,7 +158,8 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         "source": source,
     });
     let (snapshot, attach_meta) = attach(
-        &job,
+        &manager,
+        &id,
         output_offset,
         options.timeout.unwrap_or(INPUT_TIMEOUT),
     )
