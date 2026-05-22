@@ -176,7 +176,7 @@ fn error_response(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 fn tools() -> Vec<Value> {
     vec![
-        tool(
+        executor_tool(
             "read",
             "Read a file or directory",
             schema(
@@ -187,16 +187,18 @@ fn tools() -> Vec<Value> {
                     prop("limit", "number"),
                 ],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "glob",
             "Find files by glob pattern",
             schema(
                 &["pattern"],
                 &[prop("pattern", "string"), prop("path", "string")],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "grep",
             "Search file contents",
             schema(
@@ -207,21 +209,24 @@ fn tools() -> Vec<Value> {
                     prop("include", "string"),
                 ],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "apply_patch",
             "Apply opencode patch envelope",
             schema(&["patchText"], &[prop("patchText", "string")]),
+            true,
         ),
-        tool(
+        executor_tool(
             "diffy",
             "Apply standard unified/git diff",
             schema(
                 &["patchText"],
                 &[prop("patchText", "string"), prop("strip", "number")],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "exbash",
             "Run a shell command; detaches if it exceeds async_timeout",
             schema(
@@ -229,18 +234,19 @@ fn tools() -> Vec<Value> {
                 &[
                     prop("command", "string"),
                     prop("description", "string"),
-                    prop("workdir", "string"),
                     prop("timeout", "number"),
                     prop("async_timeout", "number"),
                 ],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "exbash_list",
             "List exbash runs",
             schema(&[], &[prop("asyncID", "string")]),
+            false,
         ),
-        tool(
+        executor_tool(
             "exbash_attach",
             "Write input and return a PTY snapshot after timeout",
             schema(
@@ -252,18 +258,21 @@ fn tools() -> Vec<Value> {
                     prop("timeout", "number"),
                 ],
             ),
+            true,
         ),
-        tool(
+        executor_tool(
             "exbash_stop",
             "Stop an exbash run",
             schema(&["asyncID"], &[prop("asyncID", "string")]),
+            false,
         ),
-        tool(
+        executor_tool(
             "exbash_remove",
             "Remove a stopped exbash run",
             schema(&["asyncID"], &[prop("asyncID", "string")]),
+            false,
         ),
-        tool(
+        executor_tool(
             "rg",
             "Ripgrep-style search",
             schema(
@@ -277,6 +286,7 @@ fn tools() -> Vec<Value> {
                     prop("max_count", "number"),
                 ],
             ),
+            false,
         ),
         tool(
             "list_executor",
@@ -309,8 +319,16 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
         "name": name,
         "description": description,
-        "inputSchema": add_routing(input_schema),
+        "inputSchema": input_schema,
     })
+}
+
+fn executor_tool(name: &str, description: &str, input_schema: Value, directory: bool) -> Value {
+    tool(
+        name,
+        description,
+        add_executor_routing(input_schema, directory),
+    )
 }
 
 fn schema(required: &[&str], props: &[Value]) -> Value {
@@ -329,11 +347,13 @@ fn prop(name: &str, kind: &str) -> Value {
     json!({ "name": name, "type": kind })
 }
 
-fn add_routing(mut schema: Value) -> Value {
+fn add_executor_routing(mut schema: Value, directory: bool) -> Value {
     let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
         return schema;
     };
     properties.insert("targetExecutor".to_string(), json!({ "type": "string" }));
-    properties.insert("directory".to_string(), json!({ "type": "string" }));
+    if directory {
+        properties.insert("directory".to_string(), json!({ "type": "string" }));
+    }
     schema
 }

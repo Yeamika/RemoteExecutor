@@ -32,7 +32,24 @@ async fn mcp_initialize_and_lists_tools() {
     let read = tools.iter().find(|tool| tool["name"] == "read").unwrap();
     let properties = &read["inputSchema"]["properties"];
     assert!(properties.get("targetExecutor").is_some());
+    assert!(properties.get("directory").is_some());
     assert!(properties.get("callTimeoutMs").is_none());
+
+    let list = tools
+        .iter()
+        .find(|tool| tool["name"] == "list_executor")
+        .unwrap();
+    let list_properties = &list["inputSchema"]["properties"];
+    assert!(list_properties.get("targetExecutor").is_none());
+    assert!(list_properties.get("directory").is_none());
+
+    let stop = tools
+        .iter()
+        .find(|tool| tool["name"] == "exbash_stop")
+        .unwrap();
+    let stop_properties = &stop["inputSchema"]["properties"];
+    assert!(stop_properties.get("targetExecutor").is_some());
+    assert!(stop_properties.get("directory").is_none());
 }
 
 #[tokio::test]

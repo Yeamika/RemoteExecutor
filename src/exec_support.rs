@@ -245,12 +245,8 @@ fn command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
     CommandSpec::new(exec).args(args).cwd(cwd.to_path_buf())
 }
 
-fn cwd_for(options: &ExbashOptions, ctx: &ToolContext) -> PathBuf {
-    options
-        .workdir
-        .as_ref()
-        .map(|path| ctx.resolve(path))
-        .unwrap_or_else(|| ctx.directory.clone())
+fn cwd_for(_options: &ExbashOptions, ctx: &ToolContext) -> PathBuf {
+    ctx.directory.clone()
 }
 
 fn next_id() -> String {

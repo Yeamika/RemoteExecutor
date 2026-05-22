@@ -20,8 +20,6 @@ pub struct ExbashOptions {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub workdir: Option<PathBuf>,
-    #[serde(default)]
     pub timeout: Option<u64>,
     #[serde(default, rename = "async_timeout")]
     pub async_timeout: Option<u64>,
