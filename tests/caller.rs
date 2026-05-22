@@ -138,3 +138,82 @@ async fn caller_routes_to_connected_executor() {
         .to_string()
         .contains("hello from remote"));
 }
+
+#[tokio::test]
+async fn caller_routes_to_multiple_executors() {
+    let first_dir = tempdir().unwrap();
+    let second_dir = tempdir().unwrap();
+    fs::write(first_dir.path().join("same.txt"), "from first executor\n").unwrap();
+    fs::write(second_dir.path().join("same.txt"), "from second executor\n").unwrap();
+
+    let first_addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("first"),
+        ShellManager::default_shell(80, 24),
+    )
+    .unwrap();
+    let second_addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("second"),
+        ShellManager::default_shell(80, 24),
+    )
+    .unwrap();
+
+    let caller = Caller::new().await.unwrap();
+    caller
+        .connect_to_executor(ConnectExecutorOptions {
+            id: "first".to_string(),
+            url: format!("ws://{first_addr}"),
+            system: Some("test".to_string()),
+            device: Some("first-device".to_string()),
+            labels: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    caller
+        .connect_to_executor(ConnectExecutorOptions {
+            id: "second".to_string(),
+            url: format!("ws://{second_addr}"),
+            system: Some("test".to_string()),
+            device: Some("second-device".to_string()),
+            labels: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+
+    let first = caller
+        .handle(ExecutorRequest {
+            id: json!("first"),
+            method: "read".to_string(),
+            params: json!({"filePath":"same.txt"}),
+            directory: Some(first_dir.path().to_path_buf()),
+            executor: Some("first".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+    let second = caller
+        .handle(ExecutorRequest {
+            id: json!("second"),
+            method: "read".to_string(),
+            params: json!({"filePath":"same.txt"}),
+            directory: Some(second_dir.path().to_path_buf()),
+            executor: Some("second".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(first.ok, "{:?}", first.error);
+    assert!(second.ok, "{:?}", second.error);
+    assert_eq!(first.executor.as_deref(), Some("first"));
+    assert_eq!(second.executor.as_deref(), Some("second"));
+    assert!(first
+        .result
+        .unwrap()
+        .to_string()
+        .contains("from first executor"));
+    assert!(second
+        .result
+        .unwrap()
+        .to_string()
+        .contains("from second executor"));
+}
