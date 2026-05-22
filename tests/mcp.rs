@@ -51,6 +51,11 @@ async fn mcp_initialize_and_lists_tools() {
     let stop_properties = &stop["inputSchema"]["properties"];
     assert!(stop_properties.get("targetExecutor").is_some());
     assert!(stop_properties.get("directory").is_none());
+
+    let exbash = tools.iter().find(|tool| tool["name"] == "exbash").unwrap();
+    let exbash_properties = &exbash["inputSchema"]["properties"];
+    assert!(exbash_properties.get("read_timeout").is_some());
+    assert!(exbash_properties.get("async_timeout").is_none());
 }
 
 #[tokio::test]
@@ -111,8 +116,8 @@ async fn mcp_rejects_concurrent_writes() {
 
     input_tx
         .write_all(
-            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"sleep 0.2; echo first","async_timeout":1000}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"echo second","async_timeout":1000}}}
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"sleep 0.2; echo first","read_timeout":1000}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"echo second","read_timeout":1000}}}
 "#,
         )
         .await

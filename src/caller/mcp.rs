@@ -266,14 +266,14 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "exbash",
-            "Run a shell command; detaches if it exceeds async_timeout",
+            "Run a shell command; detaches if it exceeds read_timeout",
             schema(
                 &["command"],
                 &[
                     prop("command", "string"),
                     prop("description", "string"),
                     prop("timeout", "number"),
-                    prop("async_timeout", "number"),
+                    prop("read_timeout", "number"),
                 ],
             ),
             true,

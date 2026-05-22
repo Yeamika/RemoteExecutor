@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 
-const ASYNC_TIMEOUT: u64 = 10_000;
+const READ_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExbashOptions {
     #[serde(skip)]
     pub mode: Option<String>,
@@ -21,8 +22,8 @@ pub struct ExbashOptions {
     pub description: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
-    #[serde(default, rename = "async_timeout")]
-    pub async_timeout: Option<u64>,
+    #[serde(default, rename = "read_timeout")]
+    pub read_timeout: Option<u64>,
     #[serde(default, rename = "asyncID")]
     pub async_id: Option<String>,
     #[serde(default)]
@@ -40,23 +41,21 @@ pub struct ExbashOutput {
 }
 
 pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    let mode = options.mode.as_deref().unwrap_or("exec_timeout_async");
-    match mode {
-        "exec_timeout_async" => exec_timeout_async(options, ctx).await,
-        "exec_async" => exec_async(options, ctx).await,
-        "list" => list(options, ctx).await,
-        "attach" => attach_input(options, ctx).await,
-        "exbash_stop" => stop(options, ctx).await,
-        "exbash_remove" => remove(options, ctx).await,
-        _ => Err(anyhow!("unknown exbash mode: {mode}")),
+    match options.mode.as_deref() {
+        None => run_command(options, ctx).await,
+        Some("list") => list(options, ctx).await,
+        Some("attach") => attach_input(options, ctx).await,
+        Some("exbash_stop") => stop(options, ctx).await,
+        Some("exbash_remove") => remove(options, ctx).await,
+        Some(mode) => Err(anyhow!("unknown exbash mode: {mode}")),
     }
 }
 
-async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    let async_timeout = options.async_timeout.unwrap_or(ASYNC_TIMEOUT);
+async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    let read_timeout = options.read_timeout.unwrap_or(READ_TIMEOUT);
     let description = description(&options);
     let mut job = start_job(&options, ctx).await?;
-    if let Some((detail, output)) = wait_for_stop_with_output(&mut job, async_timeout).await? {
+    if let Some((detail, output)) = wait_for_stop_with_output(&mut job, read_timeout).await? {
         job.manager.remove_pty(&job.async_id);
         return Ok(ToolResult {
             title: description.clone(),
@@ -73,26 +72,11 @@ async fn exec_timeout_async(options: ExbashOptions, ctx: &ToolContext) -> Result
     )?;
     let mut value = serde_json::to_value(&detail)?;
     value["detached"] = json!(true);
-    value["asyncTimeout"] = json!(async_timeout);
+    value["read_timeout"] = json!(read_timeout);
     Ok(ToolResult {
         title: description,
         metadata: value.clone(),
         output: serde_json::to_string_pretty(&value)?,
-    })
-}
-
-async fn exec_async(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    let job = start_job(&options, ctx).await?;
-    let detail = run_detail(
-        &job.manager,
-        &job.async_id,
-        Some(job.description),
-        job.timeout,
-    )?;
-    Ok(ToolResult {
-        title: detail.description.clone(),
-        metadata: serde_json::to_value(&detail)?,
-        output: serde_json::to_string_pretty(&detail)?,
     })
 }
 

@@ -33,7 +33,7 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
             params: json!({
                 "command":"echo hi",
                 "description":"timeout smoke",
-                "async_timeout":2000
+                "read_timeout":2000
             }),
             directory: None,
             executor: None,
@@ -43,6 +43,26 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
 
     assert!(response.ok, "{:?}", response.error);
     assert!(response.result.unwrap().to_string().contains("hi"));
+}
+
+#[tokio::test]
+async fn exbash_rejects_old_async_timeout_name() {
+    let response = Executor::local("timeout")
+        .handle(ExecutorRequest {
+            id: json!(7),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"echo hi",
+                "async_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("async_timeout"));
 }
 
 #[tokio::test]
@@ -60,7 +80,7 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
             params: json!({
                 "command": command,
                 "description":"snapshot attach",
-                "async_timeout":0
+                "read_timeout":0
             }),
             directory: None,
             executor: None,
@@ -68,7 +88,9 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
         })
         .await;
     assert!(start.ok, "{:?}", start.error);
-    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+    let start_result = start.result.unwrap();
+    assert_eq!(start_result["metadata"]["read_timeout"], json!(0));
+    let async_id = start_result["metadata"]["asyncID"]
         .as_str()
         .unwrap()
         .to_string();

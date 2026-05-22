@@ -78,7 +78,7 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
         params: json!({
             "command": command,
             "description":"visible pty exbash",
-            "async_timeout":0
+            "read_timeout":0
         }),
         directory: None,
         executor: None,

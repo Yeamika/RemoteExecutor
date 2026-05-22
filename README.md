@@ -58,7 +58,7 @@ Caller tools:
 
 Exbash tools:
 
-- `exbash`: start a command, defaulting to `exec_timeout_async` behavior.
+- `exbash`: start a command and read for `read_timeout` milliseconds before detaching; use `read_timeout: 0` to detach immediately.
 - `exbash_list`: list runs.
 - `exbash_attach`: write text or file input, wait until `timeout`, and return a PTY snapshot.
 - `exbash_stop`: stop a run.
