@@ -1,7 +1,7 @@
 use remote_executor::{Executor, ExecutorRequest};
 use serde_json::json;
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -227,6 +227,103 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(6),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
+}
+
+#[tokio::test]
+async fn exbash_attach_returns_snapshot_for_stopped_run() {
+    let executor = Executor::local("stopped-attach");
+    let command = if cfg!(windows) {
+        "Start-Sleep -Milliseconds 100; Write-Output stopped-output"
+    } else {
+        "sleep 0.1; printf stopped-output"
+    };
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(13),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "read_timeout": 0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(start.ok, "{:?}", start.error);
+    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!(14),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id.clone(),
+                "read_timeout": 1000
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(attached.ok, "{:?}", attached.error);
+    let result = attached.result.unwrap();
+    assert_eq!(result["metadata"]["state"], json!("stopped"));
+    assert_eq!(result["metadata"]["inputFailed"], json!(false));
+    assert_eq!(result["metadata"]["wrote"], json!(0));
+    assert!(result["metadata"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("task already exited"));
+    assert!(result["output"]
+        .as_str()
+        .unwrap()
+        .contains("stopped-output"));
+
+    let input_after_stop = executor
+        .handle(ExecutorRequest {
+            id: json!(15),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id.clone(),
+                "text":"ignored\n",
+                "read_timeout": 0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(input_after_stop.ok, "{:?}", input_after_stop.error);
+    let result = input_after_stop.result.unwrap();
+    assert_eq!(result["metadata"]["inputFailed"], json!(true));
+    assert_eq!(result["metadata"]["source"], json!("text"));
+    assert_eq!(result["metadata"]["wrote"], json!(0));
+    assert!(result["metadata"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("input failed: task already exited"));
+    assert!(result["output"]
+        .as_str()
+        .unwrap()
+        .contains("stopped-output"));
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(16),
             method: "exbash_remove".to_string(),
             params: json!({"asyncID":async_id}),
             directory: None,

@@ -142,8 +142,25 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         .ok_or_else(|| anyhow!("asyncID is required"))?;
     let manager = manager(ctx)?;
     let detail = manager.core().detail(&id)?;
-    if detail.exit_code.is_some() {
-        return Err(anyhow!("Async run {id} is not running"));
+    if let Some(exit_code) = detail.exit_code {
+        let input_failed = options.text.is_some() || options.file_path.is_some();
+        let message = stopped_attach_message(exit_code, input_failed);
+        let value = json!({
+            "asyncID": id,
+            "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
+            "wrote": 0,
+            "source": requested_input_source(&options),
+            "outputBytes": detail.output_history_bytes,
+            "state": "stopped",
+            "exitCode": exit_code,
+            "inputFailed": input_failed,
+            "message": message,
+        });
+        return Ok(ToolResult {
+            title: "Async run stopped".to_string(),
+            metadata: value,
+            output: manager.core().snapshot_pty_plain(&id)?,
+        });
     }
 
     let (data, source) = input_data(&options, ctx).await?;
@@ -171,4 +188,22 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         metadata: value.clone(),
         output: snapshot,
     })
+}
+
+fn requested_input_source(options: &ExbashOptions) -> &'static str {
+    match (options.text.is_some(), options.file_path.is_some()) {
+        (true, false) => "text",
+        (false, true) => "file",
+        (true, true) => "input",
+        (false, false) => "attach",
+    }
+}
+
+fn stopped_attach_message(exit_code: u32, input_failed: bool) -> String {
+    let message = format!("task already exited with code {exit_code}");
+    if input_failed {
+        format!("input failed: {message}")
+    } else {
+        message
+    }
 }
