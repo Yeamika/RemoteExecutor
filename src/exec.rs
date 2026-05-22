@@ -21,7 +21,7 @@ pub struct ExbashOptions {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub timeout: Option<u64>,
+    pub timeout: Option<i64>,
     #[serde(default, rename = "read_timeout")]
     pub read_timeout: Option<u64>,
     #[serde(default, rename = "asyncID")]
@@ -30,6 +30,16 @@ pub struct ExbashOptions {
     pub text: Option<String>,
     #[serde(default, rename = "filePath")]
     pub file_path: Option<PathBuf>,
+}
+
+impl ExbashOptions {
+    pub(crate) fn timeout_ms(&self) -> Result<Option<u64>> {
+        match self.timeout {
+            None | Some(-1) => Ok(None),
+            Some(timeout) if timeout < -1 => Err(anyhow!("timeout must be -1 or non-negative")),
+            Some(timeout) => Ok(Some(timeout as u64)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

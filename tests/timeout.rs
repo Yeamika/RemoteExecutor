@@ -66,6 +66,80 @@ async fn exbash_rejects_old_async_timeout_name() {
 }
 
 #[tokio::test]
+async fn exbash_total_timeout_accepts_minus_one() {
+    let executor = Executor::local("timeout");
+    let command = if cfg!(windows) {
+        "Start-Sleep -Seconds 5"
+    } else {
+        "sleep 5"
+    };
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(9),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "timeout": -1,
+                "read_timeout": 0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let result = start.result.unwrap();
+    assert_eq!(result["metadata"]["timeout"], json!(-1));
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
+
+    let stop = executor
+        .handle(ExecutorRequest {
+            id: json!(10),
+            method: "exbash_stop".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(stop.ok, "{:?}", stop.error);
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(11),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
+}
+
+#[tokio::test]
+async fn exbash_rejects_other_negative_total_timeouts() {
+    let response = Executor::local("timeout")
+        .handle(ExecutorRequest {
+            id: json!(12),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"echo hi",
+                "timeout":-2,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("timeout must be -1"));
+}
+
+#[tokio::test]
 async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let executor = Executor::local("attach-snapshot");
     let command = if cfg!(windows) {

@@ -26,7 +26,7 @@ pub(crate) struct RunDetail {
     pub(crate) command: String,
     pub(crate) description: String,
     pub(crate) cwd: String,
-    pub(crate) timeout: Option<u64>,
+    pub(crate) timeout: Option<i64>,
     #[serde(rename = "startedAt")]
     pub(crate) started_at: u128,
     #[serde(rename = "endedAt", skip_serializing_if = "Option::is_none")]
@@ -39,7 +39,7 @@ pub(crate) struct StartedJob {
     pub(crate) manager: ShellManager,
     pub(crate) async_id: String,
     pub(crate) description: String,
-    pub(crate) timeout: Option<u64>,
+    pub(crate) timeout: Option<i64>,
     output: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
@@ -58,10 +58,11 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
     let manager = manager(ctx)?;
     let cwd = ctx.directory.clone();
     let id = next_id();
+    let timeout_ms = options.timeout_ms()?;
     let session = manager.create_pty(id.clone(), command_spec(&command, &cwd), None, None)?;
     let output = session.subscribe_output();
 
-    if let Some(timeout) = options.timeout {
+    if let Some(timeout) = timeout_ms {
         spawn_timeout(manager.clone(), id.clone(), timeout);
     }
 
@@ -110,7 +111,7 @@ pub(crate) fn run_detail(
     manager: &ShellManager,
     async_id: &str,
     description_override: Option<String>,
-    timeout: Option<u64>,
+    timeout: Option<i64>,
 ) -> Result<RunDetail> {
     let detail = manager.core().detail(async_id)?;
     Ok(run_detail_from_session(
@@ -222,7 +223,7 @@ pub(crate) fn merge_json(target: &mut serde_json::Value, source: serde_json::Val
 fn run_detail_from_session(
     detail: SessionDetail,
     description_override: Option<String>,
-    timeout: Option<u64>,
+    timeout: Option<i64>,
 ) -> RunDetail {
     let command = detail.command.join(" ");
     let exit_code = detail.exit_code.map(|code| code as i32);
