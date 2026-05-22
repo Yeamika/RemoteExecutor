@@ -97,6 +97,7 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
         .as_str()
         .unwrap()
         .contains("hello snapshot"));
+    assert!(!result["output"].as_str().unwrap().contains("\u{1b}"));
 
     let stop = executor
         .handle(ExecutorRequest {

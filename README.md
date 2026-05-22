@@ -69,4 +69,4 @@ Caller-to-Executor connection/response timeout is an internal fixed default of `
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.
 Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocket, so `ptyt`/`ptyc` clients can list and attach to them by `asyncID`.
-`exbash_attach` waits until its `timeout` elapses, then returns the current PTY window snapshot as `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It does not write log files or accept a tail-size argument.
+`exbash_attach` waits until its `timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It does not write log files or accept a tail-size argument.

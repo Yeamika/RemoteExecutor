@@ -169,12 +169,13 @@ pub(crate) async fn attach(
 ) -> Result<(String, serde_json::Value)> {
     time::sleep(Duration::from_millis(timeout)).await;
     let snapshot = String::from_utf8_lossy(&manager.snapshot(async_id)?).into_owned();
+    let text = terminal_snapshot_to_text(&snapshot);
     let output_bytes = manager
         .core()
         .detail(async_id)?
         .output_history_bytes
         .saturating_sub(output_offset);
-    Ok((snapshot, json!({ "outputBytes": output_bytes })))
+    Ok((text, json!({ "outputBytes": output_bytes })))
 }
 
 pub(crate) async fn input_data(
@@ -315,4 +316,67 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+fn terminal_snapshot_to_text(input: &str) -> String {
+    let stripped = strip_terminal_controls(input);
+    stripped
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_terminal_controls(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    let mut previous = '\0';
+                    for next in chars.by_ref() {
+                        if next == '\u{7}' || (previous == '\u{1b}' && next == '\\') {
+                            break;
+                        }
+                        previous = next;
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else if ch == '\r' {
+            continue;
+        } else if ch.is_control() && ch != '\n' && ch != '\t' {
+            continue;
+        } else {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_snapshot_to_text;
+
+    #[test]
+    fn terminal_snapshot_to_text_strips_ansi_controls() {
+        let input = "\u{1b}[32mnode\u{1b}[m$ echo hi\r\nhi\r\n\u{1b}[?2004h";
+        assert_eq!(terminal_snapshot_to_text(input), "node$ echo hi\nhi");
+    }
 }
