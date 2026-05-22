@@ -120,6 +120,12 @@ async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult>
 }
 
 async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    if options.timeout.is_some() {
+        return Err(anyhow!(
+            "read_timeout is required instead of timeout for exbash_attach"
+        ));
+    }
+
     let id = options
         .async_id
         .clone()
@@ -138,6 +144,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
 
     let mut value = json!({
         "asyncID": id,
+        "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
         "wrote": data.len(),
         "source": source,
     });
@@ -145,7 +152,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         &manager,
         &id,
         output_offset,
-        options.timeout.unwrap_or(INPUT_TIMEOUT),
+        options.read_timeout.unwrap_or(INPUT_TIMEOUT),
     )
     .await?;
     merge_json(&mut value, attach_meta);

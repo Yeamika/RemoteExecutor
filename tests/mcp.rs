@@ -56,6 +56,14 @@ async fn mcp_initialize_and_lists_tools() {
     let exbash_properties = &exbash["inputSchema"]["properties"];
     assert!(exbash_properties.get("read_timeout").is_some());
     assert!(exbash_properties.get("async_timeout").is_none());
+
+    let attach = tools
+        .iter()
+        .find(|tool| tool["name"] == "exbash_attach")
+        .unwrap();
+    let attach_properties = &attach["inputSchema"]["properties"];
+    assert!(attach_properties.get("read_timeout").is_some());
+    assert!(attach_properties.get("timeout").is_none());
 }
 
 #[tokio::test]

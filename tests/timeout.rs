@@ -66,7 +66,7 @@ async fn exbash_rejects_old_async_timeout_name() {
 }
 
 #[tokio::test]
-async fn exbash_attach_waits_timeout_and_returns_snapshot() {
+async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let executor = Executor::local("attach-snapshot");
     let command = if cfg!(windows) {
         "$line=[Console]::In.ReadLine(); Write-Output $line; Start-Sleep -Seconds 5"
@@ -95,15 +95,31 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
         .unwrap()
         .to_string();
 
-    let started = Instant::now();
-    let attached = executor
+    let old_timeout = executor
         .handle(ExecutorRequest {
             id: json!(4),
             method: "exbash_attach".to_string(),
             params: json!({
-                "asyncID": async_id,
-                "text":"hello snapshot\n",
+                "asyncID": async_id.clone(),
                 "timeout":100
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!old_timeout.ok);
+    assert!(old_timeout.error.unwrap().contains("read_timeout"));
+
+    let started = Instant::now();
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!(8),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id.clone(),
+                "text":"hello snapshot\n",
+                "read_timeout":100
             }),
             directory: None,
             executor: None,
@@ -114,6 +130,7 @@ async fn exbash_attach_waits_timeout_and_returns_snapshot() {
     assert!(started.elapsed().as_millis() >= 90);
 
     let result = attached.result.unwrap();
+    assert_eq!(result["metadata"]["read_timeout"], json!(100));
     assert!(result["metadata"]["outputBytes"].as_u64().unwrap() > 0);
     assert!(result["output"]
         .as_str()

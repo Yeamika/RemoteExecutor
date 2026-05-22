@@ -286,14 +286,14 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "exbash_attach",
-            "Write input and return a plain-text PTY snapshot after timeout",
+            "Write input and return a plain-text PTY snapshot after read_timeout",
             schema(
                 &["asyncID"],
                 &[
                     prop("asyncID", "string"),
                     prop("text", "string"),
                     prop("filePath", "string"),
-                    prop("timeout", "number"),
+                    prop("read_timeout", "number"),
                 ],
             ),
             true,

@@ -60,7 +60,7 @@ Exbash tools:
 
 - `exbash`: start a command and read for `read_timeout` milliseconds before detaching; use `read_timeout: 0` to detach immediately.
 - `exbash_list`: list runs.
-- `exbash_attach`: write text or file input, wait until `timeout`, and return a PTY snapshot.
+- `exbash_attach`: write text or file input, wait until `read_timeout`, and return a PTY snapshot.
 - `exbash_stop`: stop a run.
 - `exbash_remove`: remove a stopped run.
 
@@ -70,4 +70,4 @@ Caller-to-Executor connection/response timeout is an internal fixed default of `
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.
 Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocket, so `ptyt`/`ptyc` clients can list and attach to them by `asyncID`.
-`exbash_attach` waits until its `timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It does not write log files or accept a tail-size argument.
+`exbash_attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. It does not write log files or accept a tail-size argument.
