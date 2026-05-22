@@ -725,9 +725,11 @@ dependencies = [
  "pty_t_protocol",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "unescaper",
 ]
 
 [[package]]
@@ -1002,6 +1004,15 @@ name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+
+[[package]]
+name = "unescaper"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4064ed685c487dbc25bd3f0e9548f2e34bab9d18cefc700f9ec2dba74ba1138e"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "unicode-ident"

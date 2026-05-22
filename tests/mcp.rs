@@ -126,7 +126,7 @@ async fn mcp_rejects_concurrent_writes() {
 
     input_tx
         .write_all(
-            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"sleep 0.2; echo first","read_timeout":1000}}}
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"echo second","read_timeout":1000}}}
 "#,
         )

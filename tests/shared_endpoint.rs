@@ -66,9 +66,9 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
         start_shared_executor_ws("127.0.0.1:0", Executor::local("shared-exbash"), manager).unwrap();
     let url = format!("ws://{addr}");
     let command = if cfg!(windows) {
-        "Write-Output visible; Start-Sleep -Seconds 1"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Write-Output visible; Start-Sleep -Seconds 1'"
     } else {
-        "printf visible; sleep 1"
+        "bash -lc 'printf visible; sleep 1'"
     };
 
     let (mut tool_ws, _) = connect_async(&url).await.unwrap();

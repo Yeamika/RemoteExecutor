@@ -58,7 +58,7 @@ async fn stdio_rejects_concurrent_writes() {
 
     input_tx
         .write_all(
-            br#"{"id":1,"tool":"exbash","params":{"command":"sleep 0.2; echo first","read_timeout":1000}}
+            br#"{"id":1,"tool":"exbash","params":{"command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}
 {"id":2,"tool":"exbash","params":{"command":"echo second","read_timeout":1000}}
 "#,
         )

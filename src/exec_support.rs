@@ -21,8 +21,8 @@ pub(crate) struct RunDetail {
     pub(crate) state: String,
     #[serde(rename = "exitCode", skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<i32>,
-    #[serde(rename = "linePointer")]
-    pub(crate) line_pointer: usize,
+    #[serde(rename = "totalOutput")]
+    pub(crate) total_output: usize,
     pub(crate) command: String,
     pub(crate) description: String,
     pub(crate) cwd: String,
@@ -59,7 +59,7 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
     let cwd = ctx.directory.clone();
     let id = next_id();
     let timeout_ms = options.timeout_ms()?;
-    let session = manager.create_pty(id.clone(), command_spec(&command, &cwd), None, None)?;
+    let session = manager.create_pty(id.clone(), command_spec(&command, &cwd)?, None, None)?;
     let output = session.subscribe_output();
 
     if let Some(timeout) = timeout_ms {
@@ -85,6 +85,7 @@ pub(crate) async fn wait_for_stop_with_output(
     loop {
         drain_output(&mut job.output, &mut output);
         if job.manager.core().try_exit_code(&job.async_id)?.is_some() {
+            time::sleep(Duration::from_millis(20)).await;
             drain_output(&mut job.output, &mut output);
             let detail = run_detail(
                 &job.manager,
@@ -182,13 +183,15 @@ pub(crate) async fn input_data(
     options: &ExbashOptions,
     ctx: &ToolContext,
 ) -> Result<(Vec<u8>, &'static str)> {
-    if options.text.is_some() && options.file_path.is_some() {
+    if options.text_input().is_some() && options.file_path_input().is_some() {
         return Err(anyhow!("Provide only one of text or filePath for attach."));
     }
-    if let Some(text) = &options.text {
-        return Ok((text.as_bytes().to_vec(), "text"));
+    if let Some(text) = options.text_input() {
+        let text = unescaper::unescape(text)
+            .map_err(|err| anyhow!("failed to parse attach text escapes: {err}"))?;
+        return Ok((text.into_bytes(), "text"));
     }
-    if let Some(path) = &options.file_path {
+    if let Some(path) = options.file_path_input() {
         return Ok((tokio::fs::read(ctx.resolve(path)).await?, "file"));
     }
     Ok((Vec::new(), "attach"))
@@ -242,7 +245,7 @@ fn run_detail_from_session(
         status,
         state,
         exit_code,
-        line_pointer: detail.output_history_bytes,
+        total_output: detail.output_history_bytes,
         command: command.clone(),
         description: description_override.unwrap_or(command),
         cwd: detail.cwd.unwrap_or_default(),
@@ -276,22 +279,15 @@ fn spawn_timeout(manager: ShellManager, async_id: String, timeout: u64) {
     });
 }
 
-fn command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
-    let exec = default_shell_name();
-    let args = match exec.to_lowercase().as_str() {
-        "powershell" | "pwsh" | "powershell.exe" => vec![
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ],
-        "cmd" | "cmd.exe" => vec!["/d", "/s", "/c", command],
-        "node" => vec!["-e", command],
-        "python" | "python3" => vec!["-c", command],
-        _ => vec!["-lc", command],
+fn command_spec(command: &str, cwd: &std::path::Path) -> Result<CommandSpec> {
+    let parts = shell_words::split(command)
+        .map_err(|err| anyhow!("failed to parse command arguments: {err}"))?;
+    let Some((program, args)) = parts.split_first() else {
+        return Err(anyhow!("command is required"));
     };
-    CommandSpec::new(exec).args(args).cwd(cwd.to_path_buf())
+    Ok(CommandSpec::new(program.clone())
+        .args(args.iter().map(String::as_str))
+        .cwd(cwd.to_path_buf()))
 }
 
 fn next_id() -> String {
@@ -301,14 +297,6 @@ fn next_id() -> String {
         now_ms(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     )
-}
-
-fn default_shell_name() -> &'static str {
-    if cfg!(windows) {
-        "powershell.exe"
-    } else {
-        "bash"
-    }
 }
 
 fn now_ms() -> u128 {

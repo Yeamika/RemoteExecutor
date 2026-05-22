@@ -69,7 +69,7 @@ async fn exbash_rejects_old_async_timeout_name() {
 async fn exbash_total_timeout_accepts_minus_one() {
     let executor = Executor::local("timeout");
     let command = if cfg!(windows) {
-        "Start-Sleep -Seconds 5"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
     } else {
         "sleep 5"
     };
@@ -143,9 +143,9 @@ async fn exbash_rejects_other_negative_total_timeouts() {
 async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let executor = Executor::local("attach-snapshot");
     let command = if cfg!(windows) {
-        "$line=[Console]::In.ReadLine(); Write-Output $line; Start-Sleep -Seconds 5"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command '$line=[Console]::In.ReadLine(); Write-Output $line; Start-Sleep -Seconds 5'"
     } else {
-        "read line; echo $line; sleep 5"
+        "bash -lc 'read line; echo $line; sleep 5'"
     };
     let start = executor
         .handle(ExecutorRequest {
@@ -241,9 +241,9 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
 async fn exbash_attach_returns_snapshot_for_stopped_run() {
     let executor = Executor::local("stopped-attach");
     let command = if cfg!(windows) {
-        "Start-Sleep -Milliseconds 100; Write-Output stopped-output"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Milliseconds 100; Write-Output stopped-output'"
     } else {
-        "sleep 0.1; printf stopped-output"
+        "bash -lc 'sleep 0.1; printf stopped-output'"
     };
     let start = executor
         .handle(ExecutorRequest {

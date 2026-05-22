@@ -40,6 +40,16 @@ impl ExbashOptions {
             Some(timeout) => Ok(Some(timeout as u64)),
         }
     }
+
+    pub(crate) fn text_input(&self) -> Option<&str> {
+        self.text.as_deref().filter(|text| !text.is_empty())
+    }
+
+    pub(crate) fn file_path_input(&self) -> Option<&PathBuf> {
+        self.file_path
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,7 +153,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
     let manager = manager(ctx)?;
     let detail = manager.core().detail(&id)?;
     if let Some(exit_code) = detail.exit_code {
-        let input_failed = options.text.is_some() || options.file_path.is_some();
+        let input_failed = options.text_input().is_some() || options.file_path_input().is_some();
         let message = stopped_attach_message(exit_code, input_failed);
         let value = json!({
             "asyncID": id,
@@ -191,7 +201,10 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
 }
 
 fn requested_input_source(options: &ExbashOptions) -> &'static str {
-    match (options.text.is_some(), options.file_path.is_some()) {
+    match (
+        options.text_input().is_some(),
+        options.file_path_input().is_some(),
+    ) {
         (true, false) => "text",
         (false, true) => "file",
         (true, true) => "input",
