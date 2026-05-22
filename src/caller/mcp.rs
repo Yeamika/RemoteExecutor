@@ -3,7 +3,10 @@ use crate::{ExecutorRequest, ExecutorResponse};
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use std::sync::Arc;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -13,33 +16,70 @@ pub async fn run_mcp_stdio() -> Result<()> {
 }
 
 pub async fn run_mcp_stdio_with_caller(caller: Caller) -> Result<()> {
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let mut stdout = BufWriter::new(tokio::io::stdout());
+    run_mcp_stdio_io_with_caller(
+        caller,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+pub async fn run_mcp_stdio_io_with_caller<R, W>(caller: Caller, reader: R, writer: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut lines = reader.lines();
+    let stdout = Arc::new(Mutex::new(BufWriter::new(writer)));
+    let mut tasks = JoinSet::new();
 
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
 
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_mcp_message(&caller, message).await,
-            Err(err) => Some(error_response(
-                Value::Null,
-                -32700,
-                format!("parse error: {err}"),
-            )),
-        };
+        let caller = caller.clone();
+        let stdout = stdout.clone();
+        tasks.spawn(async move {
+            let response = match serde_json::from_str::<Value>(&line) {
+                Ok(message) => handle_mcp_message(&caller, message).await,
+                Err(err) => Some(error_response(
+                    Value::Null,
+                    -32700,
+                    format!("parse error: {err}"),
+                )),
+            };
+            write_mcp_response(stdout, response).await
+        });
 
-        if let Some(response) = response {
-            stdout
-                .write_all(serde_json::to_string(&response)?.as_bytes())
-                .await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+        while let Some(result) = tasks.try_join_next() {
+            result??;
         }
     }
 
+    while let Some(result) = tasks.join_next().await {
+        result??;
+    }
+
+    Ok(())
+}
+
+async fn write_mcp_response<W>(
+    stdout: Arc<Mutex<BufWriter<W>>>,
+    response: Option<Value>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let mut stdout = stdout.lock().await;
+    stdout
+        .write_all(serde_json::to_string(&response)?.as_bytes())
+        .await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await?;
     Ok(())
 }
 
@@ -87,10 +127,8 @@ fn request_from_tool_call(id: Value, name: &str, arguments: Value) -> ExecutorRe
         _ => Map::new(),
     };
 
-    let executor = take_string(&mut params, "targetExecutor")
-        .or_else(|| take_string(&mut params, "target_executor"));
-    let tool_timeout_ms =
-        take_u64(&mut params, "toolTimeoutMs").or_else(|| take_u64(&mut params, "tool_timeout_ms"));
+    let executor = take_string(&mut params, "targetExecutor");
+    let tool_timeout_ms = take_u64(&mut params, "toolTimeoutMs");
     let directory = take_path(&mut params, "directory");
 
     ExecutorRequest {

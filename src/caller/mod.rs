@@ -10,8 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -21,7 +22,9 @@ const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
 pub type StdioRequest = ExecutorRequest;
 pub type StdioResponse = ExecutorResponse;
 
-pub use mcp::{handle_mcp_message, run_mcp_stdio, run_mcp_stdio_with_caller};
+pub use mcp::{
+    handle_mcp_message, run_mcp_stdio, run_mcp_stdio_io_with_caller, run_mcp_stdio_with_caller,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConnectExecutorOptions {
@@ -37,13 +40,13 @@ pub struct ConnectExecutorOptions {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SetDefaultExecutorOptions {
-    #[serde(alias = "executor")]
     pub id: String,
 }
 
 #[derive(Clone)]
 pub struct Caller {
     state: Arc<Mutex<CallerState>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -77,10 +80,23 @@ impl Caller {
                 default_executor: "local".to_string(),
                 executors,
             })),
+            write_lock: Arc::new(Mutex::new(())),
         })
     }
 
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
+        if is_write_method(&request.method) {
+            let id = request.id.clone();
+            let Ok(_guard) = self.write_lock.try_lock() else {
+                return self.err(id, "another write operation is already running");
+            };
+            return self.handle_inner(request).await;
+        }
+
+        self.handle_inner(request).await
+    }
+
+    async fn handle_inner(&self, request: ExecutorRequest) -> ExecutorResponse {
         if is_list_executor(&request.method) {
             return self.ok(request.id, self.list_executor_result().await);
         }
@@ -230,30 +246,66 @@ pub async fn run_stdio() -> Result<()> {
 }
 
 pub async fn run_stdio_with_caller(caller: Caller) -> Result<()> {
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let mut stdout = BufWriter::new(tokio::io::stdout());
+    run_stdio_io_with_caller(
+        caller,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+pub async fn run_stdio_io_with_caller<R, W>(caller: Caller, reader: R, writer: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let mut lines = reader.lines();
+    let stdout = Arc::new(Mutex::new(BufWriter::new(writer)));
+    let mut tasks = JoinSet::new();
 
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
 
-        let response = match serde_json::from_str::<StdioRequest>(&line) {
-            Ok(request) => caller.handle(request).await,
-            Err(err) => ExecutorResponse::err(
-                Value::Null,
-                Some("caller".to_string()),
-                format!("invalid request: {err}"),
-            ),
-        };
+        let caller = caller.clone();
+        let stdout = stdout.clone();
+        tasks.spawn(async move {
+            let response = match serde_json::from_str::<StdioRequest>(&line) {
+                Ok(request) => caller.handle(request).await,
+                Err(err) => ExecutorResponse::err(
+                    Value::Null,
+                    Some("caller".to_string()),
+                    format!("invalid request: {err}"),
+                ),
+            };
+            write_stdio_response(stdout, response).await
+        });
 
-        let text = serde_json::to_string(&response)?;
-        stdout.write_all(text.as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
+        while let Some(result) = tasks.try_join_next() {
+            result??;
+        }
     }
 
+    while let Some(result) = tasks.join_next().await {
+        result??;
+    }
+
+    Ok(())
+}
+
+async fn write_stdio_response<W>(
+    stdout: Arc<Mutex<BufWriter<W>>>,
+    response: StdioResponse,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let text = serde_json::to_string(&response)?;
+    let mut stdout = stdout.lock().await;
+    stdout.write_all(text.as_bytes()).await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await?;
     Ok(())
 }
 
@@ -314,22 +366,27 @@ fn normalize_ws_url(url: &str) -> String {
 }
 
 fn is_list_executor(method: &str) -> bool {
-    matches!(
-        method,
-        "list_executor" | "list_executors" | "listexecutor" | "listexecutors" | "listexecuotr"
-    )
+    method == "list_executor"
 }
 
 fn is_connect_executor(method: &str) -> bool {
-    matches!(
-        method,
-        "connect_to_executor" | "connectto_executor" | "connecttoexecutor" | "connect_executor"
-    )
+    method == "connect_to_executor"
 }
 
 fn is_set_default_executor(method: &str) -> bool {
+    method == "set_default_executor"
+}
+
+fn is_write_method(method: &str) -> bool {
     matches!(
         method,
-        "set_default_executor" | "set_def_executor" | "setdefexecutor" | "set_defexecutor"
+        "apply_patch"
+            | "diffy"
+            | "exbash"
+            | "exbash_attach"
+            | "exbash_stop"
+            | "exbash_remove"
+            | "connect_to_executor"
+            | "set_default_executor"
     )
 }

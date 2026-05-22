@@ -31,7 +31,7 @@ pub struct GrepOptions {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReadOptions {
-    #[serde(rename = "filePath", alias = "path")]
+    #[serde(rename = "filePath")]
     pub file_path: PathBuf,
     #[serde(default)]
     pub offset: Option<usize>,

@@ -13,7 +13,7 @@ const INPUT_TIMEOUT: u64 = 10_000;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExbashOptions {
-    #[serde(default)]
+    #[serde(skip)]
     pub mode: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
@@ -46,8 +46,8 @@ pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRes
         "exec_async" => exec_async(options, ctx).await,
         "list" => list(options, ctx).await,
         "attach" => attach_input(options, ctx).await,
-        "exbash_stop" | "stop" => stop(options, ctx).await,
-        "exbash_remove" | "exbasp_remove" | "remove" => remove(options, ctx).await,
+        "exbash_stop" => stop(options, ctx).await,
+        "exbash_remove" => remove(options, ctx).await,
         _ => Err(anyhow!("unknown exbash mode: {mode}")),
     }
 }

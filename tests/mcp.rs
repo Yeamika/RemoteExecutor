@@ -1,7 +1,8 @@
-use remote_executor::{handle_mcp_message, Caller};
+use remote_executor::{handle_mcp_message, run_mcp_stdio_io_with_caller, Caller};
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn mcp_initialize_and_lists_tools() {
@@ -94,4 +95,57 @@ async fn mcp_notifications_do_not_return_response() {
     )
     .await;
     assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn mcp_rejects_concurrent_writes() {
+    let caller = Caller::new().await.unwrap();
+    let (mut input_tx, input_rx) = tokio::io::duplex(4096);
+    let (output_tx, mut output_rx) = tokio::io::duplex(8192);
+
+    let runner = tokio::spawn(async move {
+        run_mcp_stdio_io_with_caller(caller, BufReader::new(input_rx), output_tx)
+            .await
+            .unwrap();
+    });
+
+    input_tx
+        .write_all(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"sleep 0.2; echo first","async_timeout":1000}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"echo second","async_timeout":1000}}}
+"#,
+        )
+        .await
+        .unwrap();
+    input_tx.shutdown().await.unwrap();
+
+    let mut output = String::new();
+    output_rx.read_to_string(&mut output).await.unwrap();
+    runner.await.unwrap();
+
+    let responses = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response["result"]["isError"] == false)
+            .count(),
+        1
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response["result"]["isError"] == true)
+            .count(),
+        1
+    );
+    assert!(responses
+        .iter()
+        .any(|response| response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("write operation")));
 }

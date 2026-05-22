@@ -40,9 +40,10 @@ Run the MCP stdio wrapper for Caller:
 cargo run --bin remote-caller-mcp
 ```
 
-The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`.
+The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`. The request field is `tool`; `method` is not accepted for Caller/Executor tool calls.
 The MCP wrapper speaks JSON-RPC over stdio and exposes the same Caller/Executor tools through `tools/list` and `tools/call`.
 Small tools (`read`, `glob`, `grep`, `apply_patch`, `diffy`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
+Stdio requests are handled concurrently in the same process. Write operations are not queued: if a write operation is already running, another write operation returns an error immediately.
 
 Patch tools:
 

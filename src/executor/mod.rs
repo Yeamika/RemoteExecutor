@@ -32,7 +32,7 @@ pub struct ExecutorInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutorRequest {
     pub id: Value,
-    #[serde(alias = "tool")]
+    #[serde(rename = "tool")]
     pub method: String,
     #[serde(default)]
     pub params: Value,
@@ -43,7 +43,6 @@ pub struct ExecutorRequest {
     #[serde(
         default,
         rename = "toolTimeoutMs",
-        alias = "tool_timeout_ms",
         skip_serializing_if = "Option::is_none"
     )]
     pub tool_timeout_ms: Option<u64>,
@@ -244,19 +243,13 @@ fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
 fn is_exbash_method(method: &str) -> bool {
     matches!(
         method,
-        "exbash"
-            | "exec"
-            | "exbash_list"
-            | "exbash_attach"
-            | "exbash_stop"
-            | "exbash_remove"
-            | "exbasp_remove"
+        "exbash" | "exbash_list" | "exbash_attach" | "exbash_stop" | "exbash_remove"
     )
 }
 
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {
     match method {
-        "exbash" | "exec" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
+        "exbash" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
         "exbash_list" => {
             let mut options = serde_json::from_value::<ExbashOptions>(params)?;
             options.mode = Some("list".to_string());
@@ -272,7 +265,7 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
             options.mode = Some("exbash_stop".to_string());
             exbash(options, ctx).await
         }
-        "exbash_remove" | "exbasp_remove" => {
+        "exbash_remove" => {
             let mut options = serde_json::from_value::<ExbashOptions>(params)?;
             options.mode = Some("exbash_remove".to_string());
             exbash(options, ctx).await
@@ -280,12 +273,8 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
         "glob" => glob_paths(serde_json::from_value::<GlobOptions>(params)?, ctx),
         "grep" => grep_paths(serde_json::from_value::<GrepOptions>(params)?, ctx).await,
         "read" => read_path(serde_json::from_value::<ReadOptions>(params)?, ctx),
-        "diffy" | "apply_diff" => {
-            apply_diffy(serde_json::from_value::<DiffOptions>(params)?, ctx).await
-        }
-        "apply" | "apply_patch" => {
-            apply_patch(serde_json::from_value::<ApplyOptions>(params)?, ctx).await
-        }
+        "diffy" => apply_diffy(serde_json::from_value::<DiffOptions>(params)?, ctx).await,
+        "apply_patch" => apply_patch(serde_json::from_value::<ApplyOptions>(params)?, ctx).await,
         "rg" => {
             let output = rg_search(serde_json::from_value::<RgOptions>(params)?).await?;
             Ok(ToolResult {

@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ApplyOptions {
-    #[serde(rename = "patchText", alias = "patch")]
+    #[serde(rename = "patchText")]
     pub patch_text: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DiffOptions {
-    #[serde(rename = "patchText", alias = "patch", alias = "diff")]
+    #[serde(rename = "patchText")]
     pub patch_text: String,
     #[serde(default)]
     pub strip: Option<usize>,
