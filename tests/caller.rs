@@ -31,6 +31,35 @@ async fn caller_lists_local_executor() {
 }
 
 #[tokio::test]
+async fn caller_rejects_non_canonical_names() {
+    let caller = Caller::new().await.unwrap();
+    for method in [
+        "list_executors",
+        "connect_executor",
+        "set_def_executor",
+        "exec",
+    ] {
+        let response = caller
+            .handle(ExecutorRequest {
+                id: json!(method),
+                method: method.to_string(),
+                params: json!({}),
+                directory: None,
+                executor: None,
+                tool_timeout_ms: None,
+            })
+            .await;
+
+        assert!(!response.ok, "{method} should not be accepted");
+        assert!(response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown method"));
+    }
+}
+
+#[tokio::test]
 async fn caller_local_executor_accepts_pty_protocol() {
     let caller = Caller::new().await.unwrap();
     let response = caller
