@@ -45,7 +45,7 @@ async fn stdio_dispatches_diffy() {
 }
 
 #[tokio::test]
-async fn stdio_rejects_concurrent_writes() {
+async fn stdio_allows_concurrent_exbash_controls() {
     let caller = Caller::new().await.unwrap();
     let (mut input_tx, input_rx) = tokio::io::duplex(4096);
     let (output_tx, mut output_rx) = tokio::io::duplex(8192);
@@ -80,16 +80,9 @@ async fn stdio_rejects_concurrent_writes() {
             .iter()
             .filter(|response| response["ok"] == true)
             .count(),
-        1
+        2
     );
-    assert_eq!(
-        responses
-            .iter()
-            .filter(|response| response["ok"] == false)
-            .count(),
-        1
-    );
-    assert!(responses.iter().any(|response| response["error"]
+    assert!(!responses.iter().any(|response| response["error"]
         .as_str()
         .unwrap_or("")
         .contains("write operation")));

@@ -378,15 +378,5 @@ fn is_set_default_executor(method: &str) -> bool {
 }
 
 fn is_write_method(method: &str) -> bool {
-    matches!(
-        method,
-        "apply_patch"
-            | "diffy"
-            | "exbash"
-            | "exbash_attach"
-            | "exbash_stop"
-            | "exbash_remove"
-            | "connect_to_executor"
-            | "set_default_executor"
-    )
+    matches!(method, "apply_patch" | "diffy")
 }

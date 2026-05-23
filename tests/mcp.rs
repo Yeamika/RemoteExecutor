@@ -113,7 +113,7 @@ async fn mcp_notifications_do_not_return_response() {
 }
 
 #[tokio::test]
-async fn mcp_rejects_concurrent_writes() {
+async fn mcp_allows_concurrent_exbash_controls() {
     let caller = Caller::new().await.unwrap();
     let (mut input_tx, input_rx) = tokio::io::duplex(4096);
     let (output_tx, mut output_rx) = tokio::io::duplex(8192);
@@ -148,16 +148,9 @@ async fn mcp_rejects_concurrent_writes() {
             .iter()
             .filter(|response| response["result"]["isError"] == false)
             .count(),
-        1
+        2
     );
-    assert_eq!(
-        responses
-            .iter()
-            .filter(|response| response["result"]["isError"] == true)
-            .count(),
-        1
-    );
-    assert!(responses
+    assert!(!responses
         .iter()
         .any(|response| response["result"]["content"][0]["text"]
             .as_str()
