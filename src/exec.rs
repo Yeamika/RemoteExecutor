@@ -37,7 +37,7 @@ pub struct ExbashOptions {
 impl ExbashOptions {
     pub(crate) fn timeout_ms(&self) -> Result<Option<u64>> {
         match self.timeout {
-            None | Some(-1) => Ok(None),
+            None | Some(-1 | 0) => Ok(None),
             Some(timeout) if timeout < -1 => Err(anyhow!("timeout must be -1 or non-negative")),
             Some(timeout) => Ok(Some(timeout as u64)),
         }

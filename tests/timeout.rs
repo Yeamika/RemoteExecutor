@@ -119,6 +119,59 @@ async fn exbash_total_timeout_accepts_minus_one() {
 }
 
 #[tokio::test]
+async fn exbash_total_timeout_accepts_zero_as_unlimited() {
+    let executor = Executor::local("timeout");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
+    } else {
+        "sleep 5"
+    };
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(18),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "timeout": 0,
+                "read_timeout": 0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let result = start.result.unwrap();
+    assert_eq!(result["metadata"]["timeout"], json!(0));
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
+
+    let stop = executor
+        .handle(ExecutorRequest {
+            id: json!(19),
+            method: "exbash_stop".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(stop.ok, "{:?}", stop.error);
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(20),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
+}
+
+#[tokio::test]
 async fn exbash_rejects_other_negative_total_timeouts() {
     let response = Executor::local("timeout")
         .handle(ExecutorRequest {
