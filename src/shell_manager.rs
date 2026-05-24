@@ -25,6 +25,7 @@ pub struct ShellManager {
     core: PtyManager,
     locked: Arc<Mutex<HashSet<String>>>,
     clients: Arc<Mutex<HashMap<String, HashMap<String, ConnectedClient>>>>,
+    exit_watchers: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ShellManager {
@@ -33,6 +34,7 @@ impl ShellManager {
             core: PtyManager::new(default_command, default_size),
             locked: Arc::new(Mutex::new(HashSet::new())),
             clients: Arc::new(Mutex::new(HashMap::new())),
+            exit_watchers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -137,6 +139,7 @@ impl ShellManager {
             rows: summary.rows,
             process_id: summary.process_id,
             created_at: summary.created_at,
+            exit_code: summary.exit_code,
             output_history_bytes: summary.output_history_bytes,
             output_history_limit: summary.output_history_limit,
             clients: summary.clients,
@@ -185,6 +188,7 @@ impl ShellManager {
                     peer_addr,
                 },
             );
+        self.start_exit_watcher(pty);
     }
 
     pub(crate) fn remove_client(&self, pty: &str, id: &str, token: u64) {
@@ -246,10 +250,42 @@ impl ShellManager {
                 role: role.to_string(),
                 cols: summary.cols,
                 rows: summary.rows,
+                exit_code: summary.exit_code,
             };
             if let Ok(text) = serde_json::to_string(&msg) {
                 let _ = tx.send(Message::Text(text.into()));
             }
         }
+    }
+
+    fn start_exit_watcher(&self, pty: &str) {
+        {
+            let mut exit_watchers = self.exit_watchers.lock().unwrap();
+            if !exit_watchers.insert(pty.to_string()) {
+                return;
+            }
+        }
+
+        let pty = pty.to_string();
+        let manager = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let Some(session) = manager.core.session(&pty) else {
+                    break;
+                };
+                match session.try_exit_code() {
+                    Ok(Some(_)) => {
+                        manager.broadcast_meta(&pty);
+                        break;
+                    }
+                    Ok(None) => time::sleep(Duration::from_millis(100)).await,
+                    Err(err) => {
+                        eprintln!("exit watcher error for {pty}: {err:#}");
+                        break;
+                    }
+                }
+            }
+            manager.exit_watchers.lock().unwrap().remove(&pty);
+        });
     }
 }
