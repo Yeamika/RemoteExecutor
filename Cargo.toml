@@ -23,6 +23,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 diffy = "0.5"
+file-id = "0.2"
 globset = "0.4"
 grep-matcher = "0.1"
 grep-regex = "0.1"

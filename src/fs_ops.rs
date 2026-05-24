@@ -375,24 +375,21 @@ fn stable_path(path: &Path) -> Result<PathBuf> {
     Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
 }
 
-#[cfg(unix)]
-fn physical_file_key(_path: &Path, metadata: &fs::Metadata) -> Result<String> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
-}
-
-#[cfg(windows)]
 fn physical_file_key(path: &Path, metadata: &fs::Metadata) -> Result<String> {
-    use std::os::windows::fs::MetadataExt;
-    match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(index)) => Ok(format!("windows:{volume}:{index}")),
-        _ => Ok(format!("path:{}", stable_path(path)?.display())),
+    match file_id::get_file_id(path) {
+        Ok(id) => Ok(format!("file-id:{id:?}")),
+        Err(_) => Ok(format!(
+            "path:{}:{}:{}",
+            stable_path(path)?.display(),
+            metadata.len(),
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0)
+        )),
     }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn physical_file_key(path: &Path, _metadata: &fs::Metadata) -> Result<String> {
-    Ok(format!("path:{}", stable_path(path)?.display()))
 }
 
 fn build_globset(globs: &[String]) -> Result<globset::GlobSet> {
