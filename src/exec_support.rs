@@ -187,8 +187,9 @@ pub(crate) async fn attach(
     async_id: &str,
     output_offset: usize,
     timeout: u64,
+    controller: Option<&str>,
 ) -> Result<(String, serde_json::Value)> {
-    time::sleep(Duration::from_millis(timeout)).await;
+    wait_attach_timeout(manager, async_id, timeout, controller).await?;
     let text = manager.core().snapshot_pty_plain(async_id)?;
     let output_bytes = manager
         .core()
@@ -196,6 +197,34 @@ pub(crate) async fn attach(
         .output_history_bytes
         .saturating_sub(output_offset);
     Ok((text, json!({ "outputBytes": output_bytes })))
+}
+
+async fn wait_attach_timeout(
+    manager: &ShellManager,
+    async_id: &str,
+    timeout: u64,
+    controller: Option<&str>,
+) -> Result<()> {
+    let deadline = time::Instant::now() + Duration::from_millis(timeout);
+    loop {
+        if let Some(controller) = controller {
+            let session = manager
+                .core()
+                .session(async_id)
+                .ok_or_else(|| anyhow!("Async run not found: {async_id}"))?;
+            let current = session.controller_id();
+            if current.as_deref() != Some(controller) {
+                let attached_by = current.unwrap_or_else(|| "unknown".to_string());
+                return Err(anyhow!("control lost: someone attached: {attached_by}"));
+            }
+        }
+
+        let now = time::Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        time::sleep((deadline - now).min(Duration::from_millis(20))).await;
+    }
 }
 
 pub(crate) async fn input_data(

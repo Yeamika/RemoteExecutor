@@ -1,4 +1,4 @@
-use remote_executor::{Executor, ExecutorRequest};
+use remote_executor::{Executor, ExecutorRequest, ShellManager};
 use serde_json::json;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -311,6 +311,87 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         .await;
     assert!(remove.ok, "{:?}", remove.error);
     assert_eq!(remove.result.unwrap()["output"], json!(""));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
+    let manager = ShellManager::default_shell(80, 24);
+    let executor = Executor::local("control").with_shell_manager(manager.clone());
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(21),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"bash -lc 'read line; echo $line; sleep 5'",
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(start.ok, "{:?}", start.error);
+    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let manager_for_steal = manager.clone();
+    let stolen_id = async_id.clone();
+    let steal = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let session = manager_for_steal.core().session(&stolen_id).unwrap();
+        let client = session
+            .register_client("ptyt".to_string(), 1, 80, 24)
+            .unwrap();
+        session.set_controller(&client).unwrap();
+    });
+
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!(22),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id.clone(),
+                "text":"hello stolen\n",
+                "read_timeout":500
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    steal.await.unwrap();
+
+    assert!(!attached.ok);
+    let error = attached.error.unwrap();
+    assert!(error.contains("someone attached"), "{error}");
+    assert!(error.contains("ptyt"), "{error}");
+
+    let stop = executor
+        .handle(ExecutorRequest {
+            id: json!(23),
+            method: "exbash_stop".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(stop.ok, "{:?}", stop.error);
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(24),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
 }
 
 #[tokio::test]

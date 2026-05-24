@@ -179,8 +179,21 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
 
     let (data, source) = input_data(&options, ctx).await?;
     let output_offset = detail.output_history_bytes;
+    let controller = (!data.is_empty()).then(|| format!("rec:{id}"));
     if !data.is_empty() {
-        manager.core().send_to_pty(&id, &data)?;
+        let session = manager
+            .core()
+            .session(&id)
+            .ok_or_else(|| anyhow!("Async run not found: {id}"))?;
+        let controller = controller.as_ref().unwrap();
+        session.force_controller(controller);
+        manager.broadcast_meta(&id);
+        if !session.write_from_controller(controller, &data)? {
+            let attached_by = session
+                .controller_id()
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(anyhow!("control lost: someone attached: {attached_by}"));
+        }
     }
 
     let mut value = json!({
@@ -194,6 +207,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         &id,
         output_offset,
         options.read_timeout.unwrap_or(INPUT_TIMEOUT),
+        controller.as_deref(),
     )
     .await?;
     merge_json(&mut value, attach_meta);
