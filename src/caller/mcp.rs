@@ -237,6 +237,12 @@ fn tools() -> Vec<Value> {
             true,
         ),
         executor_tool(
+            "stat",
+            "Return a FileStamp for a file path",
+            schema(&["filePath"], &[prop("filePath", "string")]),
+            true,
+        ),
+        executor_tool(
             "grep",
             "Search file contents",
             schema(

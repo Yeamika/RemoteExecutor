@@ -1,6 +1,6 @@
 use remote_executor::{
-    apply_diffy, apply_patch, glob_paths, read_path, ApplyOptions, DiffOptions, GlobOptions,
-    ReadOptions, ToolContext,
+    apply_diffy, apply_patch, glob_paths, read_path, stat_path, ApplyOptions, DiffOptions,
+    GlobOptions, ReadOptions, StatOptions, ToolContext,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -43,6 +43,89 @@ fn read_path_reads_file_with_lines() {
     .unwrap();
 
     assert!(output.output.contains("2: two"));
+    let file = &output.metadata["file"];
+    assert_eq!(file["kind"], "file");
+    assert!(file["fileKey"].as_str().unwrap().contains(':'));
+    assert!(file["canonicalPath"]
+        .as_str()
+        .unwrap()
+        .ends_with("sample.txt"));
+    assert_eq!(file["size"], 14);
+    assert!(file["mtimeMs"].as_u64().is_some());
+}
+
+#[test]
+fn stat_path_returns_file_stamp_for_files_and_missing_paths() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.txt");
+    fs::write(&path, "one\n").unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let read = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            offset: None,
+            limit: None,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let stat = stat_path(
+        StatOptions {
+            file_path: path.clone(),
+        },
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(read.metadata["file"], stat.metadata["file"]);
+
+    let missing = stat_path(
+        StatOptions {
+            file_path: dir.path().join("missing.txt"),
+        },
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(missing.metadata["file"]["kind"], "missing");
+    assert!(missing.metadata["file"]["fileKey"]
+        .as_str()
+        .unwrap()
+        .starts_with("missing:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn file_stamp_uses_physical_identity_for_hard_links() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    fs::write(&first, "same inode\n").unwrap();
+    std::fs::hard_link(&first, &second).unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let first = stat_path(
+        StatOptions {
+            file_path: first.clone(),
+        },
+        &ctx,
+    )
+    .unwrap();
+    let second = stat_path(
+        StatOptions {
+            file_path: second.clone(),
+        },
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.metadata["file"]["fileKey"],
+        second.metadata["file"]["fileKey"]
+    );
+    assert_ne!(
+        first.metadata["file"]["canonicalPath"],
+        second.metadata["file"]["canonicalPath"]
+    );
 }
 
 #[tokio::test]

@@ -2,10 +2,11 @@ use crate::{rg_matches, RgOptions, ToolContext, ToolResult};
 use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 const DEFAULT_READ_LIMIT: usize = 2000;
 const MAX_LINE_LENGTH: usize = 2000;
@@ -37,6 +38,34 @@ pub struct ReadOptions {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct StatOptions {
+    #[serde(rename = "filePath")]
+    pub file_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FileStamp {
+    #[serde(rename = "fileKey")]
+    pub file_key: String,
+    #[serde(rename = "canonicalPath")]
+    pub canonical_path: String,
+    pub kind: FileKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(rename = "mtimeMs", skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileKind {
+    File,
+    Directory,
+    Missing,
+    Other,
 }
 
 pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult> {
@@ -164,10 +193,12 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     let title = ctx.title(&filepath);
     let stat = fs::metadata(&filepath)
         .with_context(|| format!("File not found: {}", filepath.display()))?;
+    let file = file_stamp_for_metadata(&filepath, &stat)?;
     if stat.is_dir() {
         return read_dir(
             &filepath,
             title,
+            file,
             options.offset.unwrap_or(1),
             options.limit.unwrap_or(DEFAULT_READ_LIMIT),
         );
@@ -175,12 +206,29 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     read_file(
         &filepath,
         title,
+        file,
         options.offset.unwrap_or(1),
         options.limit.unwrap_or(DEFAULT_READ_LIMIT),
     )
 }
 
-fn read_dir(path: &Path, title: String, offset: usize, limit: usize) -> Result<ToolResult> {
+pub fn stat_path(options: StatOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    let filepath = ctx.resolve(&options.file_path);
+    let file = file_stamp(&filepath)?;
+    Ok(ToolResult {
+        title: ctx.title(&filepath),
+        metadata: json!({ "file": file }),
+        output: serde_json::to_string_pretty(&file)?,
+    })
+}
+
+fn read_dir(
+    path: &Path,
+    title: String,
+    file: FileStamp,
+    offset: usize,
+    limit: usize,
+) -> Result<ToolResult> {
     if offset < 1 {
         return Err(anyhow!("offset must be greater than or equal to 1"));
     }
@@ -224,12 +272,18 @@ fn read_dir(path: &Path, title: String, offset: usize, limit: usize) -> Result<T
 
     Ok(ToolResult {
         title,
-        metadata: json!({ "preview": sliced.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
+        metadata: json!({ "file": file, "preview": sliced.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
         output,
     })
 }
 
-fn read_file(path: &Path, title: String, offset: usize, limit: usize) -> Result<ToolResult> {
+fn read_file(
+    path: &Path,
+    title: String,
+    file: FileStamp,
+    offset: usize,
+    limit: usize,
+) -> Result<ToolResult> {
     if offset < 1 {
         return Err(anyhow!("offset must be greater than or equal to 1"));
     }
@@ -277,9 +331,68 @@ fn read_file(path: &Path, title: String, offset: usize, limit: usize) -> Result<
 
     Ok(ToolResult {
         title,
-        metadata: json!({ "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
+        metadata: json!({ "file": file, "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
         output,
     })
+}
+
+pub fn file_stamp(path: &Path) -> Result<FileStamp> {
+    match fs::metadata(path) {
+        Ok(metadata) => file_stamp_for_metadata(path, &metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(FileStamp {
+            file_key: format!("missing:{}", stable_path(path)?.display()),
+            canonical_path: stable_path(path)?.to_string_lossy().into_owned(),
+            kind: FileKind::Missing,
+            size: None,
+            mtime_ms: None,
+        }),
+        Err(err) => Err(err).with_context(|| format!("failed to stat {}", path.display())),
+    }
+}
+
+fn file_stamp_for_metadata(path: &Path, metadata: &fs::Metadata) -> Result<FileStamp> {
+    let kind = if metadata.is_file() {
+        FileKind::File
+    } else if metadata.is_dir() {
+        FileKind::Directory
+    } else {
+        FileKind::Other
+    };
+    Ok(FileStamp {
+        file_key: physical_file_key(path, metadata)?,
+        canonical_path: stable_path(path)?.to_string_lossy().into_owned(),
+        kind,
+        size: metadata.is_file().then_some(metadata.len()),
+        mtime_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis()),
+    })
+}
+
+fn stable_path(path: &Path) -> Result<PathBuf> {
+    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+#[cfg(unix)]
+fn physical_file_key(_path: &Path, metadata: &fs::Metadata) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn physical_file_key(path: &Path, metadata: &fs::Metadata) -> Result<String> {
+    use std::os::windows::fs::MetadataExt;
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => Ok(format!("windows:{volume}:{index}")),
+        _ => Ok(format!("path:{}", stable_path(path)?.display())),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn physical_file_key(path: &Path, _metadata: &fs::Metadata) -> Result<String> {
+    Ok(format!("path:{}", stable_path(path)?.display()))
 }
 
 fn build_globset(globs: &[String]) -> Result<globset::GlobSet> {

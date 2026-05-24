@@ -1,7 +1,7 @@
 use crate::{
-    apply_diffy, apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, ApplyOptions,
-    DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions, ShellManager,
-    ToolContext, ToolResult,
+    apply_diffy, apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, stat_path,
+    ApplyOptions, DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions,
+    ShellManager, StatOptions, ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -273,6 +273,7 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
         "glob" => glob_paths(serde_json::from_value::<GlobOptions>(params)?, ctx),
         "grep" => grep_paths(serde_json::from_value::<GrepOptions>(params)?, ctx).await,
         "read" => read_path(serde_json::from_value::<ReadOptions>(params)?, ctx),
+        "stat" => stat_path(serde_json::from_value::<StatOptions>(params)?, ctx),
         "diffy" => apply_diffy(serde_json::from_value::<DiffOptions>(params)?, ctx).await,
         "apply_patch" => apply_patch(serde_json::from_value::<ApplyOptions>(params)?, ctx).await,
         "rg" => {

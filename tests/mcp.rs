@@ -27,6 +27,7 @@ async fn mcp_initialize_and_lists_tools() {
     .unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "read"));
+    assert!(tools.iter().any(|tool| tool["name"] == "stat"));
     assert!(tools
         .iter()
         .any(|tool| tool["name"] == "connect_to_executor"));

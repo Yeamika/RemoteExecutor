@@ -19,7 +19,10 @@ pub use executor::{
     dispatch_tool, start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest,
     ExecutorResponse,
 };
-pub use fs_ops::{glob_paths, grep_paths, read_path, GlobOptions, GrepOptions, ReadOptions};
+pub use fs_ops::{
+    file_stamp, glob_paths, grep_paths, read_path, stat_path, FileKind, FileStamp, GlobOptions,
+    GrepOptions, ReadOptions, StatOptions,
+};
 pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
 pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 pub use shell_manager::ShellManager;
@@ -56,5 +59,9 @@ impl RemoteExecutor {
 
     pub async fn search(&self, options: RgOptions) -> Result<RgOutput> {
         self.rg.search(options).await
+    }
+
+    pub fn stat(&self, file_path: impl Into<PathBuf>) -> Result<FileStamp> {
+        file_stamp(&file_path.into())
     }
 }

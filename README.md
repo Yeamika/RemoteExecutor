@@ -20,6 +20,8 @@ The same `--listen` endpoint now accepts both Caller tool requests and `pty-t` c
 
 Release packages include GNU Linux builds plus musl static Linux builds. Use the `*-musl-static` packages for older distributions such as Ubuntu 18 or minimal buildroot-style systems where newer glibc dependencies are a problem. For 32-bit systems, use `remote-executor-linux-i686-musl-static` on x86 and try `remote-executor-linux-armv7-musl-static` first on ARM SoC boards.
 
+`read` and `stat` return `metadata.file` as a FileStamp: `fileKey`, `canonicalPath`, `kind`, and optional `size`/`mtimeMs`. Callers should compare `<executor>:<fileKey>` instead of path strings when checking whether a file was read before write/edit.
+
 ```bash
 cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001 --pty main
 ```
