@@ -18,6 +18,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
+const EXBASH_TIMEOUT_BUFFER_MS: u64 = 5_000;
 
 pub type StdioRequest = ExecutorRequest;
 pub type StdioResponse = ExecutorResponse;
@@ -223,8 +224,9 @@ impl Caller {
 impl ExecutorEndpoint {
     async fn call(&self, mut request: ExecutorRequest) -> ExecutorResponse {
         let request_id = request.id.clone();
+        let call_timeout_ms = call_timeout_ms_for(&request);
         request.executor = None;
-        match call_ws(&self.url, request, DEFAULT_CALL_TIMEOUT_MS).await {
+        match call_ws(&self.url, request, call_timeout_ms).await {
             Ok(mut response) => {
                 response
                     .executor
@@ -379,4 +381,17 @@ fn is_set_default_executor(method: &str) -> bool {
 
 fn is_write_method(method: &str) -> bool {
     matches!(method, "apply_patch" | "diffy")
+}
+
+fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {
+    if matches!(request.method.as_str(), "exbash" | "exbash_attach") {
+        let read_timeout = request
+            .params
+            .get("read_timeout")
+            .and_then(Value::as_u64)
+            .unwrap_or(10_000);
+        return read_timeout.saturating_add(EXBASH_TIMEOUT_BUFFER_MS);
+    }
+
+    DEFAULT_CALL_TIMEOUT_MS
 }

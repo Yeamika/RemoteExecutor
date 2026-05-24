@@ -140,6 +140,50 @@ async fn caller_routes_to_connected_executor() {
 }
 
 #[tokio::test]
+async fn caller_allows_exbash_read_timeout_over_default_rpc_timeout() {
+    let manager = ShellManager::default_shell(80, 24);
+    let addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("remote-exbash-timeout"),
+        manager,
+    )
+    .unwrap();
+
+    let caller = Caller::new().await.unwrap();
+    caller
+        .connect_to_executor(ConnectExecutorOptions {
+            id: "remote-exbash-timeout".to_string(),
+            url: format!("ws://{addr}"),
+            system: Some("test".to_string()),
+            device: None,
+            labels: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+
+    let response = caller
+        .handle(ExecutorRequest {
+            id: json!("long-read-timeout"),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"echo long-timeout-ok",
+                "read_timeout":31_000
+            }),
+            directory: None,
+            executor: Some("remote-exbash-timeout".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    assert!(response
+        .result
+        .unwrap()
+        .to_string()
+        .contains("long-timeout-ok"));
+}
+
+#[tokio::test]
 async fn caller_routes_to_multiple_executors() {
     let first_dir = tempdir().unwrap();
     let second_dir = tempdir().unwrap();
