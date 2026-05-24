@@ -63,6 +63,7 @@ async fn mcp_initialize_and_lists_tools() {
         .unwrap();
     let attach_properties = &attach["inputSchema"]["properties"];
     assert!(attach_properties.get("read_timeout").is_some());
+    assert!(attach_properties.get("showRawPretty").is_some());
     assert!(attach_properties.get("timeout").is_none());
     assert!(attach_properties.get("targetExecutor").is_some());
     assert!(attach_properties.get("directory").is_none());

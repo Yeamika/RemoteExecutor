@@ -139,6 +139,25 @@ pub(crate) fn list_run_details(
     Ok(runs)
 }
 
+pub(crate) fn format_run_details(runs: &[RunDetail]) -> String {
+    if runs.is_empty() {
+        return "No async runs".to_string();
+    }
+    runs.iter()
+        .map(|run| {
+            let exit = run
+                .exit_code
+                .map(|code| format!(" exit={code}"))
+                .unwrap_or_default();
+            format!(
+                "{} {}{} totalOutput={} command={}",
+                run.async_id, run.state, exit, run.total_output, run.command
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<RunDetail> {
     let session = manager
         .core()

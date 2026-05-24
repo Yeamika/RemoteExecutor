@@ -1,6 +1,6 @@
 use crate::exec_support::{
-    attach, clip, description, input_data, list_run_details, manager, merge_json, remove_run,
-    run_detail, start_job, stop_run, wait_for_stop_with_output,
+    attach, clip, description, format_run_details, input_data, list_run_details, manager,
+    merge_json, remove_run, run_detail, start_job, stop_run, wait_for_stop_with_output,
 };
 use crate::{ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
@@ -30,6 +30,8 @@ pub struct ExbashOptions {
     pub text: Option<String>,
     #[serde(default, rename = "filePath")]
     pub file_path: Option<PathBuf>,
+    #[serde(default, rename = "showRawPretty")]
+    pub show_raw_pretty: bool,
 }
 
 impl ExbashOptions {
@@ -107,7 +109,7 @@ async fn list(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     Ok(ToolResult {
         title: "Async runs listed".to_string(),
         metadata: value.clone(),
-        output: serde_json::to_string_pretty(&value)?,
+        output: format_run_details(&runs),
     })
 }
 
@@ -118,10 +120,11 @@ async fn stop(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
         .ok_or_else(|| anyhow!("asyncID is required"))?;
     let manager = manager(ctx)?;
     let detail = stop_run(&manager, &id).await?;
+    let output = manager.core().snapshot_pty_plain(&id)?;
     Ok(ToolResult {
         title: "Async run stopped".to_string(),
         metadata: serde_json::to_value(&detail)?,
-        output: serde_json::to_string_pretty(&detail)?,
+        output,
     })
 }
 
@@ -135,7 +138,7 @@ async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult>
     Ok(ToolResult {
         title: "Async run removed".to_string(),
         metadata: value.clone(),
-        output: serde_json::to_string_pretty(&value)?,
+        output: String::new(),
     })
 }
 
@@ -155,7 +158,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
     if let Some(exit_code) = detail.exit_code {
         let input_failed = options.text_input().is_some() || options.file_path_input().is_some();
         let message = stopped_attach_message(exit_code, input_failed);
-        let value = json!({
+        let mut value = json!({
             "asyncID": id,
             "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
             "wrote": 0,
@@ -166,6 +169,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
             "inputFailed": input_failed,
             "message": message,
         });
+        add_raw_pretty(&manager, &id, &mut value, options.show_raw_pretty)?;
         return Ok(ToolResult {
             title: "Async run stopped".to_string(),
             metadata: value,
@@ -193,11 +197,31 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
     )
     .await?;
     merge_json(&mut value, attach_meta);
+    add_raw_pretty(&manager, &id, &mut value, options.show_raw_pretty)?;
     Ok(ToolResult {
         title: "Async input sent".to_string(),
         metadata: value.clone(),
         output: snapshot,
     })
+}
+
+fn add_raw_pretty(
+    manager: &crate::ShellManager,
+    id: &str,
+    value: &mut serde_json::Value,
+    show: bool,
+) -> Result<()> {
+    if !show {
+        return Ok(());
+    }
+    let formatted = manager.core().snapshot_pty(id)?;
+    merge_json(
+        value,
+        json!({
+            "rawPretty": String::from_utf8_lossy(&formatted),
+        }),
+    );
+    Ok(())
 }
 
 fn requested_input_source(options: &ExbashOptions) -> &'static str {

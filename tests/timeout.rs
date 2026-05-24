@@ -211,6 +211,24 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         .unwrap()
         .contains("hello snapshot"));
     assert!(!result["output"].as_str().unwrap().contains("\u{1b}"));
+    assert!(result["metadata"].get("rawPretty").is_none());
+
+    let raw_pretty = executor
+        .handle(ExecutorRequest {
+            id: json!(17),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id.clone(),
+                "read_timeout":0,
+                "showRawPretty":true
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(raw_pretty.ok, "{:?}", raw_pretty.error);
+    assert!(raw_pretty.result.unwrap()["metadata"]["rawPretty"].is_string());
 
     let stop = executor
         .handle(ExecutorRequest {
@@ -223,6 +241,10 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         })
         .await;
     assert!(stop.ok, "{:?}", stop.error);
+    assert!(stop.result.unwrap()["output"]
+        .as_str()
+        .unwrap()
+        .contains("hello snapshot"));
 
     let remove = executor
         .handle(ExecutorRequest {
@@ -235,6 +257,7 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         })
         .await;
     assert!(remove.ok, "{:?}", remove.error);
+    assert_eq!(remove.result.unwrap()["output"], json!(""));
 }
 
 #[tokio::test]

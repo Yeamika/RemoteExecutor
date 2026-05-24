@@ -294,6 +294,7 @@ fn tools() -> Vec<Value> {
                     prop("text", "string"),
                     prop("filePath", "string"),
                     prop("read_timeout", "number"),
+                    prop("showRawPretty", "boolean"),
                 ],
             ),
             false,
