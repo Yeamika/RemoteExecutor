@@ -1,6 +1,6 @@
 use remote_executor::{
     apply_diffy, apply_patch, glob_paths, read_path, stat_path, ApplyOptions, DiffOptions,
-    GlobOptions, ReadOptions, StatOptions, ToolContext,
+    GlobOptions, ReadMode, ReadOptions, StatOptions, ToolContext,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -25,6 +25,78 @@ fn glob_paths_uses_pattern_matching() {
     assert!(output.output.contains("a.rs"));
 }
 
+#[tokio::test]
+async fn apply_patch_can_write_and_update_binary() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.bin");
+
+    let write = format!(
+        "*** Begin Patch\n*** Binary Write File: {}\n+00 01 02 03\n*** End Patch\n",
+        path.display()
+    );
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+    apply_patch(ApplyOptions { patch_text: write }, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), [0x00, 0x01, 0x02, 0x03]);
+
+    let update = format!(
+        "*** Begin Patch\n*** Binary Update File: {}\n*** Offset: 1\n*** Old Bytes: 01 02\n*** New Bytes: AA BB CC\n*** End Patch\n",
+        path.display()
+    );
+    apply_patch(ApplyOptions { patch_text: update }, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), [0x00, 0xAA, 0xBB, 0xCC, 0x03]);
+}
+
+#[test]
+fn read_path_reports_binary_offset_and_byte() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("binary.dat");
+    fs::write(&path, [0x41, 0x42, 0x00, 0x43]).unwrap();
+
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+    let err = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            mode: None,
+            offset: None,
+            limit: None,
+        },
+        &ctx,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("offset 2"), "{err}");
+    assert!(err.contains("0x00"), "{err}");
+}
+
+#[test]
+fn read_path_binary_mode_returns_limited_hexdump() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("binary.dat");
+    fs::write(&path, (0u8..=200).collect::<Vec<_>>()).unwrap();
+
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+    let output = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            mode: Some(ReadMode::Binary),
+            offset: Some(1),
+            limit: Some(999),
+        },
+        &ctx,
+    )
+    .unwrap();
+
+    assert!(output.output.contains("<type>binary</type>"));
+    assert!(output.output.contains("00000001"));
+    assert_eq!(output.metadata["length"], 128);
+    assert_eq!(output.metadata["truncated"], true);
+}
+
 #[test]
 fn read_path_reads_file_with_lines() {
     let dir = tempdir().unwrap();
@@ -35,6 +107,7 @@ fn read_path_reads_file_with_lines() {
     let output = read_path(
         ReadOptions {
             file_path: path.clone(),
+            mode: None,
             offset: Some(2),
             limit: Some(1),
         },
@@ -64,6 +137,7 @@ fn stat_path_returns_file_stamp_for_files_and_missing_paths() {
     let read = read_path(
         ReadOptions {
             file_path: path.clone(),
+            mode: None,
             offset: None,
             limit: None,
         },

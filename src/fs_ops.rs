@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const DEFAULT_READ_LIMIT: usize = 2000;
+const BINARY_READ_LIMIT: usize = 128;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated to 2000 chars)";
 const GLOB_LIMIT: usize = 100;
@@ -19,6 +20,64 @@ pub struct GlobOptions {
     pub pattern: String,
     #[serde(default)]
     pub path: Option<PathBuf>,
+}
+
+fn read_binary_file(
+    path: &Path,
+    title: String,
+    file: FileStamp,
+    offset: usize,
+    limit: usize,
+) -> Result<ToolResult> {
+    let bytes = fs::read(path)?;
+    if offset > bytes.len() {
+        return Err(anyhow!(
+            "Offset {offset} is out of range for this file ({} bytes)",
+            bytes.len()
+        ));
+    }
+
+    let limit = limit.clamp(1, BINARY_READ_LIMIT);
+    let end = (offset + limit).min(bytes.len());
+    let slice = &bytes[offset..end];
+    let truncated = end < bytes.len();
+    let hex = hexdump(slice, offset);
+    let tail = if truncated {
+        format!(
+            "\n\n(Showing bytes {}-{} of {}. Use offset={} to continue.)",
+            offset,
+            end.saturating_sub(1),
+            bytes.len(),
+            end
+        )
+    } else {
+        format!("\n\n(End of file - total {} bytes)", bytes.len())
+    };
+    let output = format!(
+        "<path>{}</path>\n<type>binary</type>\n<content encoding=\"hex\" offset=\"{}\" length=\"{}\" total=\"{}\">\n{}{}\n</content>",
+        path.display(),
+        offset,
+        slice.len(),
+        bytes.len(),
+        hex,
+        tail
+    );
+
+    Ok(ToolResult {
+        title,
+        metadata: json!({
+            "file": file,
+            "mode": "binary",
+            "encoding": "hex",
+            "offset": offset,
+            "length": slice.len(),
+            "totalBytes": bytes.len(),
+            "truncated": truncated,
+            "preview": hex,
+            "loaded": []
+        }),
+        output,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -35,9 +94,18 @@ pub struct ReadOptions {
     #[serde(rename = "filePath")]
     pub file_path: PathBuf,
     #[serde(default)]
+    pub mode: Option<ReadMode>,
+    #[serde(default)]
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadMode {
+    Text,
+    Binary,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -194,13 +262,29 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     let stat = fs::metadata(&filepath)
         .with_context(|| format!("File not found: {}", filepath.display()))?;
     let file = file_stamp_for_metadata(&filepath, &stat)?;
+    let mode = options.mode.unwrap_or(ReadMode::Text);
     if stat.is_dir() {
+        if mode == ReadMode::Binary {
+            return Err(anyhow!(
+                "binary read mode only supports files: {}",
+                filepath.display()
+            ));
+        }
         return read_dir(
             &filepath,
             title,
             file,
             options.offset.unwrap_or(1),
             options.limit.unwrap_or(DEFAULT_READ_LIMIT),
+        );
+    }
+    if mode == ReadMode::Binary {
+        return read_binary_file(
+            &filepath,
+            title,
+            file,
+            options.offset.unwrap_or(0),
+            options.limit.unwrap_or(BINARY_READ_LIMIT),
         );
     }
     read_file(
@@ -288,8 +372,13 @@ fn read_file(
         return Err(anyhow!("offset must be greater than or equal to 1"));
     }
     let bytes = fs::read(path)?;
-    if is_binary(&bytes) {
-        return Err(anyhow!("Cannot read binary file: {}", path.display()));
+    if let Some((offset, byte)) = binary_byte(&bytes) {
+        return Err(anyhow!(
+            "Cannot read binary file: {} (binary byte at offset {}: 0x{:02X})",
+            path.display(),
+            offset,
+            byte
+        ));
     }
 
     let text = String::from_utf8_lossy(&bytes);
@@ -416,7 +505,40 @@ fn truncate_line(line: &str) -> String {
     format!("{}{}", &line[..MAX_LINE_LENGTH], MAX_LINE_SUFFIX)
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
-    let sample = &bytes[..bytes.len().min(4096)];
-    sample.contains(&0)
+fn binary_byte(bytes: &[u8]) -> Option<(usize, u8)> {
+    bytes
+        .iter()
+        .take(4096)
+        .enumerate()
+        .find_map(|(idx, byte)| (*byte == 0).then_some((idx, *byte)))
+}
+
+fn hexdump(bytes: &[u8], base: usize) -> String {
+    bytes
+        .chunks(16)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let offset = base + row * 16;
+            let hex = (0..16)
+                .map(|idx| {
+                    chunk
+                        .get(idx)
+                        .map(|byte| format!("{byte:02X}"))
+                        .unwrap_or_else(|| "  ".to_string())
+                })
+                .collect::<Vec<_>>();
+            let ascii = chunk
+                .iter()
+                .map(|byte| {
+                    if byte.is_ascii_graphic() || *byte == b' ' {
+                        *byte as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect::<String>();
+            format!("{offset:08X}  {}  |{}|", hex.join(" "), ascii)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

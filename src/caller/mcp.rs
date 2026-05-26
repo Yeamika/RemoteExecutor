@@ -221,6 +221,7 @@ fn tools() -> Vec<Value> {
                 &["filePath"],
                 &[
                     prop("filePath", "string"),
+                    prop("mode", "string"),
                     prop("offset", "number"),
                     prop("limit", "number"),
                 ],
@@ -272,11 +273,11 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "exbash",
-            "Run a shell command; detaches if it exceeds read_timeout",
+            "Run a shell command; command input must be at most 4KB; detaches if it exceeds read_timeout",
             schema(
                 &["command"],
                 &[
-                    prop("command", "string"),
+                    prop_desc("command", "string", "Command input must be at most 4KB"),
                     prop("description", "string"),
                     prop("timeout", "number"),
                     prop("read_timeout", "number"),
@@ -292,12 +293,12 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "exbash_attach",
-            "Write input and return a plain-text PTY snapshot after read_timeout",
+            "Write input and return a plain-text PTY snapshot after read_timeout; text input must be at most 4KB",
             schema(
                 &["asyncID"],
                 &[
                     prop("asyncID", "string"),
-                    prop("text", "string"),
+                    prop_desc("text", "string", "Text input must be at most 4KB"),
                     prop("filePath", "string"),
                     prop("read_timeout", "number"),
                     prop("showRawPretty", "boolean"),

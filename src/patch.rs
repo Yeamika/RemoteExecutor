@@ -184,6 +184,95 @@ fn apply_unified_diff(
     Ok(files)
 }
 
+fn apply_binary_write(
+    ctx: &ToolContext,
+    path: &str,
+    lines: &[&str],
+    mut i: usize,
+    end: usize,
+) -> Result<(PatchFile, usize)> {
+    let target = resolve_patch_path(ctx, path);
+    let before = fs::read(&target).unwrap_or_default();
+    let mut text = String::new();
+    while i < end {
+        let line = lines[i];
+        if line.starts_with("*** ") {
+            break;
+        }
+        let body = line.strip_prefix('+').unwrap_or(line);
+        text.push_str(body);
+        text.push('\n');
+        i += 1;
+    }
+    let after = decode_hex(&text)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&target, &after)?;
+    Ok((
+        binary_patch_file(ctx, &target, "binary-write", &before, &after, None),
+        i,
+    ))
+}
+
+fn apply_binary_update(
+    ctx: &ToolContext,
+    path: &str,
+    lines: &[&str],
+    mut i: usize,
+    end: usize,
+) -> Result<(PatchFile, usize)> {
+    let target = resolve_patch_path(ctx, path);
+    let before = fs::read(&target)?;
+    let mut offset: Option<usize> = None;
+    let mut old = None;
+    let mut new = None;
+    while i < end {
+        let line = lines[i];
+        if line.starts_with("*** Binary ")
+            || line.starts_with("*** Add File:")
+            || line.starts_with("*** Delete File:")
+            || line.starts_with("*** Update File:")
+        {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("*** Offset:") {
+            offset = Some(value.trim().parse()?);
+        } else if let Some(value) = line.strip_prefix("*** Old Bytes:") {
+            old = Some(decode_hex(value.trim())?);
+        } else if let Some(value) = line.strip_prefix("*** New Bytes:") {
+            new = Some(decode_hex(value.trim())?);
+        } else if !line.trim().is_empty() {
+            return Err(anyhow!("unsupported binary update line: {line}"));
+        }
+        i += 1;
+    }
+    let offset = offset.ok_or_else(|| anyhow!("binary update requires *** Offset:"))?;
+    let old = old.ok_or_else(|| anyhow!("binary update requires *** Old Bytes:"))?;
+    let new = new.ok_or_else(|| anyhow!("binary update requires *** New Bytes:"))?;
+    let end_offset = offset + old.len();
+    if end_offset > before.len() {
+        return Err(anyhow!(
+            "binary update range {}..{} is out of bounds for {} bytes",
+            offset,
+            end_offset,
+            before.len()
+        ));
+    }
+    if before[offset..end_offset] != old {
+        return Err(anyhow!(
+            "binary update old bytes did not match at offset {offset}"
+        ));
+    }
+    let mut after = before.clone();
+    after.splice(offset..end_offset, new.iter().copied());
+    fs::write(&target, &after)?;
+    Ok((
+        binary_patch_file(ctx, &target, "binary-update", &before, &after, None),
+        i,
+    ))
+}
+
 fn parse_file_patches(patch_text: &str) -> Result<Vec<FilePatch<'_, str>>> {
     let git = PatchSet::parse(patch_text, ParseOptions::gitdiff())
         .collect::<std::result::Result<Vec<_>, _>>();
@@ -246,7 +335,15 @@ fn apply_tool_patch(ctx: &ToolContext, patch: &str) -> Result<Vec<PatchFile>> {
     let mut i = begin + 1;
     while i < end {
         let line = lines[i];
-        if let Some(path) = line.strip_prefix("*** Add File:") {
+        if let Some(path) = line.strip_prefix("*** Binary Write File:") {
+            let (file, next) = apply_binary_write(ctx, path.trim(), &lines, i + 1, end)?;
+            files.push(file);
+            i = next;
+        } else if let Some(path) = line.strip_prefix("*** Binary Update File:") {
+            let (file, next) = apply_binary_update(ctx, path.trim(), &lines, i + 1, end)?;
+            files.push(file);
+            i = next;
+        } else if let Some(path) = line.strip_prefix("*** Add File:") {
             let (file, next) = apply_add(ctx, path.trim(), &lines, i + 1, end)?;
             files.push(file);
             i = next;
@@ -410,6 +507,76 @@ fn patch_file(
         deletions,
         move_path,
     }
+}
+
+fn binary_patch_file(
+    ctx: &ToolContext,
+    path: &Path,
+    kind: &str,
+    before: &[u8],
+    after: &[u8],
+    move_path: Option<String>,
+) -> PatchFile {
+    let before_hex = bytes_hex(before);
+    let after_hex = bytes_hex(after);
+    let diff = format!(
+        "Binary {kind}: {}\n- {} bytes: {}\n+ {} bytes: {}\n",
+        path.display(),
+        before.len(),
+        before_hex,
+        after.len(),
+        after_hex
+    );
+    PatchFile {
+        file_path: path.to_string_lossy().into_owned(),
+        relative_path: ctx.title(path),
+        kind: kind.to_string(),
+        diff,
+        before: before_hex,
+        after: after_hex,
+        additions: after.len(),
+        deletions: before.len(),
+        move_path,
+    }
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    const MAX: usize = 128;
+    let mut value = bytes
+        .iter()
+        .take(MAX)
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > MAX {
+        value.push_str(" ...");
+    }
+    value
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>> {
+    let compact = text
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.strip_prefix("0x")
+                .or_else(|| part.strip_prefix("0X"))
+                .unwrap_or(part)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if compact.len() % 2 != 0 {
+        return Err(anyhow!(
+            "hex byte content must contain an even number of digits"
+        ));
+    }
+    (0..compact.len())
+        .step_by(2)
+        .map(|idx| {
+            u8::from_str_radix(&compact[idx..idx + 2], 16)
+                .map_err(|err| anyhow!("invalid hex byte at digit {idx}: {err}"))
+        })
+        .collect()
 }
 
 fn diff_text(path: &Path, before: &str, after: &str) -> String {

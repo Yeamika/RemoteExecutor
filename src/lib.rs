@@ -21,7 +21,7 @@ pub use executor::{
 };
 pub use fs_ops::{
     file_stamp, glob_paths, grep_paths, read_path, stat_path, FileKind, FileStamp, GlobOptions,
-    GrepOptions, ReadOptions, StatOptions,
+    GrepOptions, ReadMode, ReadOptions, StatOptions,
 };
 pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
 pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
