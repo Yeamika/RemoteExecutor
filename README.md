@@ -66,7 +66,7 @@ Exbash tools:
 - `exbash_list`: list runs.
 - `exbash_attach`: write text or file input, wait until `read_timeout`, and return a PTY snapshot.
 - `exbash_stop`: stop a run.
-- `exbash_remove`: remove a stopped run.
+- `exbash_remove`: stop a running run if needed, close connected PTY clients, and remove the run.
 
 Executors are addressed over WebSocket. The built-in `local` executor is started automatically by `Caller`.
 MCP calls can route to a specific Executor with the optional `targetExecutor` argument.
@@ -74,4 +74,4 @@ Caller-to-Executor connection/response timeout is an internal fixed default of `
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.
 Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocket, so `ptyt`/`ptyc` clients can list and attach to them by `asyncID`.
-`exbash_attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. If `showRawPretty` is true, attach also includes `rawPretty` in metadata; it defaults to false. When attach sends input, it takes PTY controller as `rec:<asyncID>` and leaves that controller in place; if a ptyt/ptyc client takes control before `read_timeout`, attach fails immediately with `control lost: someone attached: <client-id>`. If the task already stopped, attach returns the final snapshot immediately and sets `message`, `state`, `exitCode`, and `inputFailed`; when input was requested, `message` starts with `input failed`. `exbash_stop` also returns a plain text snapshot in `output`; `exbash_remove` returns no output. It does not write log files or accept a tail-size argument.
+`exbash_attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. If `showRawPretty` is true, attach also includes `rawPretty` in metadata; it defaults to false. When attach sends input, it takes PTY controller as `rec:<asyncID>` and leaves that controller in place; if a ptyt/ptyc client takes control before `read_timeout`, attach fails immediately with `control lost: someone attached: <client-id>`. If the task already stopped, attach returns the final snapshot immediately and sets `message`, `state`, `exitCode`, and `inputFailed`; when input was requested, `message` starts with `input failed`. `exbash_stop` also returns a plain text snapshot in `output`; `exbash_remove` returns no output and marks `metadata.stopped` when it had to stop a running process before removal. It does not write log files or accept a tail-size argument.

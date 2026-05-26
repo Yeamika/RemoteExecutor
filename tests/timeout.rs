@@ -46,6 +46,119 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
 }
 
 #[tokio::test]
+async fn exbash_detach_returns_current_snapshot() {
+    let executor = Executor::local("detach-snapshot");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Write-Output before-detach; Start-Sleep -Seconds 5'"
+    } else {
+        "bash -lc 'echo before-detach; sleep 5'"
+    };
+
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(21),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "description":"detach snapshot",
+                "read_timeout":200
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let result = start.result.unwrap();
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
+    assert_eq!(result["metadata"]["detached"], json!(true));
+    assert!(result["output"].as_str().unwrap().contains("before-detach"));
+    assert!(result["metadata"].get("output").is_none());
+
+    let _ = executor
+        .handle(ExecutorRequest {
+            id: json!(22),
+            method: "exbash_stop".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    let _ = executor
+        .handle(ExecutorRequest {
+            id: json!(23),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn exbash_remove_stops_running_process_before_removal() {
+    let executor = Executor::local("remove-running");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
+    } else {
+        "sleep 5"
+    };
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(24),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(25),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
+    let result = remove.result.unwrap();
+    assert_eq!(result["metadata"]["removed"], json!(true));
+    assert_eq!(result["metadata"]["stopped"], json!(true));
+    assert_eq!(result["output"], json!(""));
+
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!(26),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID": async_id,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!attached.ok);
+}
+
+#[tokio::test]
 async fn exbash_rejects_old_async_timeout_name() {
     let response = Executor::local("timeout")
         .handle(ExecutorRequest {

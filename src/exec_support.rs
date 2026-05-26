@@ -171,15 +171,37 @@ pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<R
     run_detail(manager, async_id, None, None)
 }
 
-pub(crate) fn remove_run(manager: &ShellManager, async_id: &str) -> Result<serde_json::Value> {
+pub(crate) async fn remove_run(
+    manager: &ShellManager,
+    async_id: &str,
+) -> Result<serde_json::Value> {
     let detail = manager.core().detail(async_id)?;
-    if detail.exit_code.is_none() {
-        return Err(anyhow!(
-            "Async run {async_id} must be stopped before removal"
-        ));
+    let mut stopped = false;
+    let exit_code = if let Some(code) = detail.exit_code {
+        Some(code)
+    } else {
+        let session = manager
+            .core()
+            .session(async_id)
+            .ok_or_else(|| anyhow!("Async run not found: {async_id}"))?;
+        session.kill()?;
+        stopped = true;
+        manager
+            .core()
+            .wait_exit_code_timeout(async_id, Duration::from_millis(500))
+            .await?
+    };
+
+    let mut value = json!({
+        "asyncID": async_id,
+        "removed": true,
+        "stopped": stopped,
+    });
+    if let Some(code) = exit_code {
+        value["exitCode"] = json!(code);
     }
     manager.remove_pty(async_id);
-    Ok(json!({ "asyncID": async_id, "removed": true }))
+    Ok(value)
 }
 
 pub(crate) async fn attach(

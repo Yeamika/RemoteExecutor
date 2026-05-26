@@ -92,13 +92,14 @@ async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRe
         Some(job.description.clone()),
         job.timeout,
     )?;
+    let snapshot = job.manager.core().snapshot_pty_plain(&job.async_id)?;
     let mut value = serde_json::to_value(&detail)?;
     value["detached"] = json!(true);
     value["read_timeout"] = json!(read_timeout);
     Ok(ToolResult {
         title: description,
         metadata: value.clone(),
-        output: serde_json::to_string_pretty(&value)?,
+        output: snapshot,
     })
 }
 
@@ -134,7 +135,7 @@ async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult>
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
     let manager = manager(ctx)?;
-    let value = remove_run(&manager, &id)?;
+    let value = remove_run(&manager, &id).await?;
     Ok(ToolResult {
         title: "Async run removed".to_string(),
         metadata: value.clone(),
