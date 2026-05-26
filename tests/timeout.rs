@@ -179,6 +179,155 @@ async fn exbash_rejects_old_async_timeout_name() {
 }
 
 #[tokio::test]
+async fn exbash_rejects_oversized_inputs() {
+    let executor = Executor::local("input-limits");
+
+    let command = "x".repeat(4097);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(27),
+            method: "exbash".to_string(),
+            params: json!({"command":command}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("command exceeds 4096"));
+
+    let description = "x".repeat(31);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(28),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"echo hi",
+                "description":description
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("description exceeds 30"));
+
+    let async_id = "x".repeat(31);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(29),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID":async_id,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("asyncID exceeds 30"));
+
+    let text = "x".repeat(4097);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(30),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID":"rex-short",
+                "text":text,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("text exceeds 4096"));
+
+    let file_path = "x".repeat(4097);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(31),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID":"rex-short",
+                "filePath":file_path,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!response.ok);
+    assert!(response.error.unwrap().contains("filePath exceeds 4096"));
+}
+
+#[tokio::test]
+async fn exbash_attach_rejects_oversized_file_input() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("payload.txt"), vec![b'x'; 4097]).unwrap();
+
+    let executor = Executor::local("input-file-limit");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
+    } else {
+        "sleep 5"
+    };
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(32),
+            method: "exbash".to_string(),
+            params: json!({
+                "command": command,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(start.ok, "{:?}", start.error);
+    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!(33),
+            method: "exbash_attach".to_string(),
+            params: json!({
+                "asyncID":async_id.clone(),
+                "filePath":"payload.txt",
+                "read_timeout":0
+            }),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!attached.ok);
+    assert!(attached.error.unwrap().contains("file input exceeds 4096"));
+
+    let remove = executor
+        .handle(ExecutorRequest {
+            id: json!(34),
+            method: "exbash_remove".to_string(),
+            params: json!({"asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(remove.ok, "{:?}", remove.error);
+}
+
+#[tokio::test]
 async fn exbash_total_timeout_accepts_minus_one() {
     let executor = Executor::local("timeout");
     let command = if cfg!(windows) {

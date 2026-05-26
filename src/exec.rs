@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 const READ_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
+const INPUT_BYTES_LIMIT: usize = 4096;
+const SHORT_INPUT_BYTES_LIMIT: usize = 30;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +36,40 @@ pub struct ExbashOptions {
     pub show_raw_pretty: bool,
 }
 
+fn validate_optional_bytes(name: &str, value: Option<&str>, limit: usize) -> Result<()> {
+    if let Some(value) = value {
+        validate_bytes(name, value, limit)?;
+    }
+    Ok(())
+}
+
+fn validate_bytes(name: &str, value: &str, limit: usize) -> Result<()> {
+    let len = value.len();
+    if len > limit {
+        return Err(anyhow!("{name} exceeds {limit} bytes ({len} bytes)"));
+    }
+    Ok(())
+}
+
 impl ExbashOptions {
+    pub(crate) const INPUT_BYTES_LIMIT: usize = INPUT_BYTES_LIMIT;
+
+    pub(crate) fn validate_input_limits(&self) -> Result<()> {
+        validate_optional_bytes("command", self.command.as_deref(), INPUT_BYTES_LIMIT)?;
+        validate_optional_bytes(
+            "description",
+            self.description.as_deref(),
+            SHORT_INPUT_BYTES_LIMIT,
+        )?;
+        validate_optional_bytes("asyncID", self.async_id.as_deref(), SHORT_INPUT_BYTES_LIMIT)?;
+        validate_optional_bytes("text", self.text.as_deref(), INPUT_BYTES_LIMIT)?;
+        if let Some(path) = self.file_path_input() {
+            let value = path.to_string_lossy();
+            validate_bytes("filePath", &value, INPUT_BYTES_LIMIT)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn timeout_ms(&self) -> Result<Option<u64>> {
         match self.timeout {
             None | Some(-1 | 0) => Ok(None),
@@ -63,6 +98,7 @@ pub struct ExbashOutput {
 }
 
 pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    options.validate_input_limits()?;
     match options.mode.as_deref() {
         None => run_command(options, ctx).await,
         Some("list") => list(options, ctx).await,
