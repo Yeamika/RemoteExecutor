@@ -60,9 +60,9 @@ jobs:
           submodules: recursive
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        run: |
+          rustup default stable
+          rustup target add ${{ matrix.target }}
 
       - name: Cache Rust
         if: runner.os != 'Windows'
