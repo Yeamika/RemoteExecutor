@@ -61,9 +61,18 @@ impl ShellManager {
     }
 
     pub fn remove_pty(&self, pty: &str) -> bool {
-        self.clients.lock().unwrap().remove(pty);
+        self.close_pty_clients(pty);
         self.locked.lock().unwrap().remove(pty);
         self.core.state().remove_session(pty).is_some()
+    }
+
+    pub fn close_pty_clients(&self, pty: &str) {
+        let clients = self.clients.lock().unwrap().remove(pty);
+        if let Some(clients) = clients {
+            for client in clients.into_values() {
+                let _ = client.tx.send(Message::Close(None));
+            }
+        }
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {

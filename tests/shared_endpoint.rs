@@ -242,3 +242,112 @@ async fn shared_endpoint_meta_reports_pty_exit_code() {
         .unwrap();
     assert_eq!(session.exit_code, Some(7));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exbash_remove_closes_connected_pty_client() {
+    let manager = ShellManager::default_shell(80, 24);
+    let addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("shared-remove-close"),
+        manager,
+    )
+    .unwrap();
+    let url = format!("ws://{addr}");
+
+    let (mut tool_ws, _) = connect_async(&url).await.unwrap();
+    let request = ExecutorRequest {
+        id: json!(30),
+        method: "exbash".to_string(),
+        params: json!({
+            "command":"bash -lc 'printf done'",
+            "read_timeout":0
+        }),
+        directory: None,
+        executor: None,
+        tool_timeout_ms: None,
+    };
+    tool_ws
+        .send(Message::Text(
+            serde_json::to_string(&request).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let Message::Text(response) = tool_ws.next().await.unwrap().unwrap() else {
+        panic!("expected text tool response");
+    };
+    let response: ExecutorResponse = serde_json::from_str(&response).unwrap();
+    assert!(response.ok, "{:?}", response.error);
+    let async_id = response.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (mut pty_ws, _) = connect_async(&url).await.unwrap();
+    pty_ws
+        .send(Message::Text(
+            serde_json::to_string(&ClientText::Hello {
+                id: "ptyt".to_string(),
+                pty: async_id.clone(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let Some(message) = pty_ws.next().await else {
+                return;
+            };
+            let Ok(Message::Text(text)) = message else {
+                continue;
+            };
+            let Ok(ServerText::Meta { .. }) = serde_json::from_str(&text) else {
+                continue;
+            };
+            return;
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let remove = ExecutorRequest {
+        id: json!(31),
+        method: "exbash_remove".to_string(),
+        params: json!({"asyncID":async_id}),
+        directory: None,
+        executor: None,
+        tool_timeout_ms: None,
+    };
+    tool_ws
+        .send(Message::Text(
+            serde_json::to_string(&remove).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let Message::Text(response) = tool_ws.next().await.unwrap().unwrap() else {
+        panic!("expected text tool response");
+    };
+    let response: ExecutorResponse = serde_json::from_str(&response).unwrap();
+    assert!(response.ok, "{:?}", response.error);
+
+    let close = timeout(Duration::from_secs(2), async {
+        loop {
+            let Some(message) = pty_ws.next().await else {
+                return true;
+            };
+            match message.unwrap() {
+                Message::Close(_) => return true,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(close);
+}
