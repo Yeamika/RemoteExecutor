@@ -393,6 +393,10 @@ fn prop(name: &str, kind: &str) -> Value {
     json!({ "name": name, "type": kind })
 }
 
+fn prop_desc(name: &str, kind: &str, description: &str) -> Value {
+    json!({ "name": name, "type": kind, "description": description })
+}
+
 fn add_executor_routing(mut schema: Value, directory: bool) -> Value {
     let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
         return schema;
