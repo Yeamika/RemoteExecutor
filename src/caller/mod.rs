@@ -384,7 +384,10 @@ fn is_write_method(method: &str) -> bool {
 }
 
 fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {
-    if matches!(request.method.as_str(), "exbash" | "exbash_attach") {
+    if matches!(
+        request.method.as_str(),
+        "exbash" | "exbash_shell" | "exbash_attach"
+    ) {
         let read_timeout = request
             .params
             .get("read_timeout")

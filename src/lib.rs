@@ -14,7 +14,7 @@ pub use caller::{
     run_mcp_stdio_with_caller, run_stdio, run_stdio_io_with_caller, run_stdio_with_caller, Caller,
     ConnectExecutorOptions, SetDefaultExecutorOptions, StdioRequest, StdioResponse,
 };
-pub use exec::{exbash, ExbashOptions, ExbashOutput};
+pub use exec::{exbash, exbash_shell, ExbashOptions, ExbashOutput};
 pub use executor::{
     dispatch_tool, start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest,
     ExecutorResponse,

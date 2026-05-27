@@ -1,7 +1,7 @@
 use crate::{
-    apply_diffy, apply_patch, exbash, glob_paths, grep_paths, read_path, rg_search, stat_path,
-    ApplyOptions, DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions,
-    ShellManager, StatOptions, ToolContext, ToolResult,
+    apply_diffy, apply_patch, exbash, exbash_shell, glob_paths, grep_paths, read_path, rg_search,
+    stat_path, ApplyOptions, DiffOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions,
+    RgOptions, ShellManager, StatOptions, ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -243,13 +243,19 @@ fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
 fn is_exbash_method(method: &str) -> bool {
     matches!(
         method,
-        "exbash" | "exbash_list" | "exbash_attach" | "exbash_stop" | "exbash_remove"
+        "exbash"
+            | "exbash_shell"
+            | "exbash_list"
+            | "exbash_attach"
+            | "exbash_stop"
+            | "exbash_remove"
     )
 }
 
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {
     match method {
         "exbash" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
+        "exbash_shell" => exbash_shell(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
         "exbash_list" => {
             let mut options = serde_json::from_value::<ExbashOptions>(params)?;
             options.mode = Some("list".to_string());

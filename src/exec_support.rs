@@ -59,7 +59,12 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
     let cwd = ctx.directory.clone();
     let id = next_id();
     let timeout_ms = options.timeout_ms()?;
-    let session = manager.create_pty(id.clone(), command_spec(&command, &cwd)?, None, None)?;
+    let session = manager.create_pty(
+        id.clone(),
+        command_spec(&command, &cwd, options.shell)?,
+        None,
+        None,
+    )?;
     let output = session.subscribe_output();
 
     if let Some(timeout) = timeout_ms {
@@ -361,7 +366,11 @@ fn spawn_timeout(manager: ShellManager, async_id: String, timeout: u64) {
     });
 }
 
-fn command_spec(command: &str, cwd: &std::path::Path) -> Result<CommandSpec> {
+fn command_spec(command: &str, cwd: &std::path::Path, shell: bool) -> Result<CommandSpec> {
+    if shell {
+        return Ok(shell_command_spec(command, cwd));
+    }
+
     let parts = shell_words::split(command)
         .map_err(|err| anyhow!("failed to parse command arguments: {err}"))?;
     let Some((program, args)) = parts.split_first() else {
@@ -370,6 +379,24 @@ fn command_spec(command: &str, cwd: &std::path::Path) -> Result<CommandSpec> {
     Ok(CommandSpec::new(program.clone())
         .args(args.iter().map(String::as_str))
         .cwd(cwd.to_path_buf()))
+}
+
+fn shell_command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
+    if cfg!(windows) {
+        CommandSpec::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ])
+            .cwd(cwd.to_path_buf())
+    } else {
+        CommandSpec::new("sh")
+            .args(["-c", command])
+            .cwd(cwd.to_path_buf())
+    }
 }
 
 fn next_id() -> String {

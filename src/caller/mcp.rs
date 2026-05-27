@@ -229,6 +229,20 @@ fn tools() -> Vec<Value> {
             true,
         ),
         executor_tool(
+            "exbash_shell",
+            "Run a command through the platform shell; command input must be at most 4KB; detaches if it exceeds read_timeout",
+            schema(
+                &["command"],
+                &[
+                    prop_desc("command", "string", "Command input must be at most 4KB"),
+                    prop("description", "string"),
+                    prop("timeout", "number"),
+                    prop("read_timeout", "number"),
+                ],
+            ),
+            true,
+        ),
+        executor_tool(
             "glob",
             "Find files by glob pattern",
             schema(
@@ -273,7 +287,7 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "exbash",
-            "Run a shell command; command input must be at most 4KB; detaches if it exceeds read_timeout",
+            "Run a command directly without shell wrapping; command input must be at most 4KB; detaches if it exceeds read_timeout",
             schema(
                 &["command"],
                 &[

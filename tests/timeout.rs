@@ -46,6 +46,54 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
 }
 
 #[tokio::test]
+async fn exbash_shell_wraps_command_with_platform_shell() {
+    let command = if cfg!(windows) {
+        "Write-Output shell-ok"
+    } else {
+        "echo shell-ok"
+    };
+    let response = Executor::local("shell")
+        .handle(ExecutorRequest {
+            id: json!(35),
+            method: "exbash_shell".to_string(),
+            params: json!({
+                "command":command,
+                "read_timeout":2000
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    assert!(response.result.unwrap().to_string().contains("shell-ok"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exbash_direct_does_not_use_shell_syntax() {
+    let response = Executor::local("direct")
+        .handle(ExecutorRequest {
+            id: json!(36),
+            method: "exbash".to_string(),
+            params: json!({
+                "command":"echo direct-a; echo direct-b",
+                "read_timeout":2000
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let text = response.result.unwrap().to_string();
+    assert!(text.contains("direct-a; echo direct-b"), "{text}");
+    assert!(!text.contains("direct-b\r\n"), "{text}");
+}
+
+#[tokio::test]
 async fn exbash_detach_returns_current_snapshot() {
     let executor = Executor::local("detach-snapshot");
     let command = if cfg!(windows) {

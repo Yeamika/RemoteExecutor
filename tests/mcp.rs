@@ -57,6 +57,7 @@ async fn mcp_initialize_and_lists_tools() {
     let exbash_properties = &exbash["inputSchema"]["properties"];
     assert!(exbash_properties.get("read_timeout").is_some());
     assert!(exbash_properties.get("async_timeout").is_none());
+    assert!(tools.iter().any(|tool| tool["name"] == "exbash_shell"));
 
     let attach = tools
         .iter()

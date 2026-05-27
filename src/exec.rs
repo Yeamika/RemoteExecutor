@@ -18,6 +18,8 @@ const SHORT_INPUT_BYTES_LIMIT: usize = 30;
 pub struct ExbashOptions {
     #[serde(skip)]
     pub mode: Option<String>,
+    #[serde(skip)]
+    pub shell: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -34,6 +36,11 @@ pub struct ExbashOptions {
     pub file_path: Option<PathBuf>,
     #[serde(default, rename = "showRawPretty")]
     pub show_raw_pretty: bool,
+}
+
+pub async fn exbash_shell(mut options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+    options.shell = true;
+    exbash(options, ctx).await
 }
 
 fn validate_optional_bytes(name: &str, value: Option<&str>, limit: usize) -> Result<()> {

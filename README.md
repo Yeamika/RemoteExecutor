@@ -62,7 +62,8 @@ Caller tools:
 
 Exbash tools:
 
-- `exbash`: start a command and read for `read_timeout` milliseconds before detaching; use `read_timeout: 0` to detach immediately. `timeout` is the optional total command runtime limit; omit it or set `timeout: -1`/`0` for no total limit.
+- `exbash`: start a command directly, without shell wrapping, and read for `read_timeout` milliseconds before detaching; use `read_timeout: 0` to detach immediately. `timeout` is the optional total command runtime limit; omit it or set `timeout: -1`/`0` for no total limit.
+- `exbash_shell`: start a command through the platform shell (`sh -c` on Unix, `powershell.exe -Command` on Windows) with the same timeout behavior as `exbash`.
 - `exbash_list`: list runs.
 - `exbash_attach`: write text or file input, wait until `read_timeout`, and return a PTY snapshot.
 - `exbash_stop`: stop a run.
