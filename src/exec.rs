@@ -11,7 +11,8 @@ use std::path::PathBuf;
 const READ_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
 const INPUT_BYTES_LIMIT: usize = 4096;
-const SHORT_INPUT_BYTES_LIMIT: usize = 30;
+const DESCRIPTION_BYTES_LIMIT: usize = 100;
+const ASYNC_ID_BYTES_LIMIT: usize = 30;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,9 +67,9 @@ impl ExbashOptions {
         validate_optional_bytes(
             "description",
             self.description.as_deref(),
-            SHORT_INPUT_BYTES_LIMIT,
+            DESCRIPTION_BYTES_LIMIT,
         )?;
-        validate_optional_bytes("asyncID", self.async_id.as_deref(), SHORT_INPUT_BYTES_LIMIT)?;
+        validate_optional_bytes("asyncID", self.async_id.as_deref(), ASYNC_ID_BYTES_LIMIT)?;
         validate_optional_bytes("text", self.text.as_deref(), INPUT_BYTES_LIMIT)?;
         if let Some(path) = self.file_path_input() {
             let value = path.to_string_lossy();

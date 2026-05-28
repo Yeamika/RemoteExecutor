@@ -244,7 +244,7 @@ async fn exbash_rejects_oversized_inputs() {
     assert!(!response.ok);
     assert!(response.error.unwrap().contains("command exceeds 4096"));
 
-    let description = "x".repeat(31);
+    let description = "x".repeat(101);
     let response = executor
         .handle(ExecutorRequest {
             id: json!(28),
@@ -259,7 +259,7 @@ async fn exbash_rejects_oversized_inputs() {
         })
         .await;
     assert!(!response.ok);
-    assert!(response.error.unwrap().contains("description exceeds 30"));
+    assert!(response.error.unwrap().contains("description exceeds 100"));
 
     let async_id = "x".repeat(31);
     let response = executor
