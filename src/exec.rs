@@ -1,6 +1,7 @@
 use crate::exec_support::{
-    attach, clip, description, format_run_details, input_data, list_run_details, manager,
-    merge_json, remove_run, run_detail, start_job, stop_run, wait_for_stop_with_output,
+    attach, clear_exit_code_label, clip, description, exit_code_display, exit_code_json,
+    format_run_details, input_data, list_run_details, manager, merge_json, remove_run, run_detail,
+    start_job, stop_run, wait_for_stop_with_output,
 };
 use crate::{ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
@@ -123,9 +124,10 @@ async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRe
     let mut job = start_job(&options, ctx).await?;
     if let Some((detail, output)) = wait_for_stop_with_output(&mut job, read_timeout).await? {
         job.manager.remove_pty(&job.async_id);
+        clear_exit_code_label(&job.async_id);
         return Ok(ToolResult {
             title: description.clone(),
-            metadata: json!({ "output": clip(&output), "exit": detail.exit_code, "description": description }),
+            metadata: json!({ "output": clip(&output), "exitCode": detail.exit_code, "description": description }),
             output,
         });
     }
@@ -202,7 +204,10 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
     let detail = manager.core().detail(&id)?;
     if let Some(exit_code) = detail.exit_code {
         let input_failed = options.text_input().is_some() || options.file_path_input().is_some();
-        let message = stopped_attach_message(exit_code, input_failed);
+        let exit_code_display = exit_code_display(&id, exit_code);
+        let message = stopped_attach_message(&exit_code_display, input_failed);
+        let exit_code_value =
+            exit_code_json(&id, Some(exit_code)).unwrap_or_else(|| json!(exit_code));
         let mut value = json!({
             "asyncID": id,
             "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
@@ -210,7 +215,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
             "source": requested_input_source(&options),
             "outputBytes": detail.output_history_bytes,
             "state": "stopped",
-            "exitCode": exit_code,
+            "exitCode": exit_code_value,
             "inputFailed": input_failed,
             "message": message,
         });
@@ -295,7 +300,7 @@ fn requested_input_source(options: &ExbashOptions) -> &'static str {
     }
 }
 
-fn stopped_attach_message(exit_code: u32, input_failed: bool) -> String {
+fn stopped_attach_message(exit_code: &str, input_failed: bool) -> String {
     let message = format!("task already exited with code {exit_code}");
     if input_failed {
         format!("input failed: {message}")

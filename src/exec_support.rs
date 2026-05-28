@@ -3,8 +3,10 @@ use crate::{ShellManager, ToolContext};
 use anyhow::{anyhow, Result};
 use pty_t_core::{CommandSpec, SessionDetail};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -20,7 +22,7 @@ pub(crate) struct RunDetail {
     pub(crate) status: String,
     pub(crate) state: String,
     #[serde(rename = "exitCode", skip_serializing_if = "Option::is_none")]
-    pub(crate) exit_code: Option<i32>,
+    pub(crate) exit_code: Option<Value>,
     #[serde(rename = "totalOutput")]
     pub(crate) total_output: usize,
     pub(crate) command: String,
@@ -44,6 +46,8 @@ pub(crate) struct StartedJob {
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static EXIT_CODE_LABELS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn manager(ctx: &ToolContext) -> Result<ShellManager> {
     ctx.shell_manager()
@@ -152,7 +156,8 @@ pub(crate) fn format_run_details(runs: &[RunDetail]) -> String {
         .map(|run| {
             let exit = run
                 .exit_code
-                .map(|code| format!(" exit={code}"))
+                .as_ref()
+                .map(|code| format!(" exit={}", exit_code_value_text(code)))
                 .unwrap_or_default();
             format!(
                 "{} {}{} totalOutput={} command={}",
@@ -168,6 +173,7 @@ pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<R
         .core()
         .session(async_id)
         .ok_or_else(|| anyhow!("Async run not found: {async_id}"))?;
+    set_exit_code_label(async_id, "stopped");
     session.kill()?;
     let _ = manager
         .core()
@@ -206,7 +212,24 @@ pub(crate) async fn remove_run(
         value["exitCode"] = json!(code);
     }
     manager.remove_pty(async_id);
+    clear_exit_code_label(async_id);
     Ok(value)
+}
+
+pub(crate) fn clear_exit_code_label(async_id: &str) {
+    EXIT_CODE_LABELS.lock().unwrap().remove(async_id);
+}
+
+pub(crate) fn exit_code_display(async_id: &str, code: u32) -> String {
+    exit_code_label(async_id).unwrap_or_else(|| code.to_string())
+}
+
+pub(crate) fn exit_code_json(async_id: &str, code: Option<u32>) -> Option<Value> {
+    code.map(|code| {
+        exit_code_label(async_id)
+            .map(Value::String)
+            .unwrap_or_else(|| json!(code))
+    })
 }
 
 pub(crate) async fn attach(
@@ -316,7 +339,8 @@ fn run_detail_from_session(
     timeout: Option<i64>,
 ) -> RunDetail {
     let command = detail.command.join(" ");
-    let exit_code = detail.exit_code.map(|code| code as i32);
+    let raw_exit_code = detail.exit_code;
+    let exit_code = exit_code_json(&detail.pty, raw_exit_code);
     let state = if exit_code.is_some() {
         "stopped"
     } else {
@@ -324,8 +348,10 @@ fn run_detail_from_session(
     }
     .to_string();
     let status = exit_code
-        .map(|code| format!("stopped (exit {code})"))
+        .as_ref()
+        .map(|code| format!("stopped (exit {})", exit_code_value_text(code)))
         .unwrap_or_else(|| "running".to_string());
+    let ended_at = exit_code.as_ref().map(|_| now_ms());
     RunDetail {
         async_id: detail.pty,
         pid: detail.process_id,
@@ -338,9 +364,27 @@ fn run_detail_from_session(
         cwd: detail.cwd.unwrap_or_default(),
         timeout,
         started_at: u128::from(detail.created_at),
-        ended_at: exit_code.map(|_| now_ms()),
+        ended_at,
         error: None,
     }
+}
+
+fn exit_code_label(async_id: &str) -> Option<String> {
+    EXIT_CODE_LABELS.lock().unwrap().get(async_id).cloned()
+}
+
+fn exit_code_value_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn set_exit_code_label(async_id: &str, label: &str) {
+    EXIT_CODE_LABELS
+        .lock()
+        .unwrap()
+        .insert(async_id.to_string(), label.to_string());
 }
 
 fn drain_output(rx: &mut mpsc::UnboundedReceiver<Vec<u8>>, output: &mut Vec<u8>) {
@@ -360,6 +404,7 @@ fn spawn_timeout(manager: ShellManager, async_id: String, timeout: u64) {
             .is_none()
         {
             if let Some(session) = manager.core().session(&async_id) {
+                set_exit_code_label(&async_id, "timeout");
                 let _ = session.kill();
             }
         }
