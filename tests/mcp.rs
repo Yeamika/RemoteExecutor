@@ -36,6 +36,16 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(properties.get("targetExecutor").is_some());
     assert!(properties.get("directory").is_some());
     assert!(properties.get("callTimeoutMs").is_none());
+    assert!(properties.get("hashCheckMode").is_some());
+
+    let apply_patch = tools
+        .iter()
+        .find(|tool| tool["name"] == "apply_patch")
+        .unwrap();
+    let apply_properties = &apply_patch["inputSchema"]["properties"];
+    assert!(apply_properties.get("filePath").is_some());
+    assert!(apply_properties.get("hashCode").is_some());
+    assert!(!tools.iter().any(|tool| tool["name"] == "diffy"));
 
     let list = tools
         .iter()

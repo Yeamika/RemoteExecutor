@@ -4,6 +4,7 @@ use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -28,6 +29,7 @@ fn read_binary_file(
     file: FileStamp,
     offset: usize,
     limit: usize,
+    hash_code: Option<String>,
 ) -> Result<ToolResult> {
     let bytes = fs::read(path)?;
     if offset > bytes.len() {
@@ -53,9 +55,14 @@ fn read_binary_file(
     } else {
         format!("\n\n(End of file - total {} bytes)", bytes.len())
     };
+    let hash_output = hash_code
+        .as_ref()
+        .map(|value| format!("\n<hashCode>{value}</hashCode>"))
+        .unwrap_or_default();
     let output = format!(
-        "<path>{}</path>\n<type>binary</type>\n<content encoding=\"hex\" offset=\"{}\" length=\"{}\" total=\"{}\">\n{}{}\n</content>",
+        "<path>{}</path>\n<type>binary</type>{}\n<content encoding=\"hex\" offset=\"{}\" length=\"{}\" total=\"{}\">\n{}{}\n</content>",
         path.display(),
+        hash_output,
         offset,
         slice.len(),
         bytes.len(),
@@ -63,19 +70,24 @@ fn read_binary_file(
         tail
     );
 
+    let mut metadata = json!({
+        "file": file,
+        "mode": "binary",
+        "encoding": "hex",
+        "offset": offset,
+        "length": slice.len(),
+        "totalBytes": bytes.len(),
+        "truncated": truncated,
+        "preview": hex,
+        "loaded": []
+    });
+    if let Some(hash_code) = hash_code {
+        metadata["hashCode"] = json!(hash_code);
+    }
+
     Ok(ToolResult {
         title,
-        metadata: json!({
-            "file": file,
-            "mode": "binary",
-            "encoding": "hex",
-            "offset": offset,
-            "length": slice.len(),
-            "totalBytes": bytes.len(),
-            "truncated": truncated,
-            "preview": hex,
-            "loaded": []
-        }),
+        metadata,
         output,
     })
 }
@@ -99,6 +111,8 @@ pub struct ReadOptions {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default, rename = "hashCheckMode")]
+    pub hash_check_mode: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -262,6 +276,17 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     let stat = fs::metadata(&filepath)
         .with_context(|| format!("File not found: {}", filepath.display()))?;
     let file = file_stamp_for_metadata(&filepath, &stat)?;
+    let hash_code = if options.hash_check_mode {
+        if !stat.is_file() {
+            return Err(anyhow!(
+                "hashCheckMode only supports files: {}",
+                filepath.display()
+            ));
+        }
+        Some(file_hash_code(&filepath)?)
+    } else {
+        None
+    };
     let mode = options.mode.unwrap_or(ReadMode::Text);
     if stat.is_dir() {
         if mode == ReadMode::Binary {
@@ -285,6 +310,7 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
             file,
             options.offset.unwrap_or(0),
             options.limit.unwrap_or(BINARY_READ_LIMIT),
+            hash_code,
         );
     }
     read_file(
@@ -293,6 +319,7 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
         file,
         options.offset.unwrap_or(1),
         options.limit.unwrap_or(DEFAULT_READ_LIMIT),
+        hash_code,
     )
 }
 
@@ -367,6 +394,7 @@ fn read_file(
     file: FileStamp,
     offset: usize,
     limit: usize,
+    hash_code: Option<String>,
 ) -> Result<ToolResult> {
     if offset < 1 {
         return Err(anyhow!("offset must be greater than or equal to 1"));
@@ -400,10 +428,11 @@ fn read_file(
         .collect::<Vec<_>>();
     let last = offset + raw.len().saturating_sub(1);
     let truncated = start + raw.len() < lines.len();
-    let mut output = format!(
-        "<path>{}</path>\n<type>file</type>\n<content>",
-        path.display()
-    );
+    let mut output = format!("<path>{}</path>\n<type>file</type>", path.display());
+    if let Some(hash_code) = &hash_code {
+        output.push_str(&format!("\n<hashCode>{hash_code}</hashCode>"));
+    }
+    output.push_str("\n<content>");
     for (idx, line) in raw.iter().enumerate() {
         output.push_str(&format!("\n{}: {line}", offset + idx));
     }
@@ -418,11 +447,30 @@ fn read_file(
     }
     output.push_str("\n</content>");
 
+    let mut metadata = json!({ "file": file, "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] });
+    if let Some(hash_code) = hash_code {
+        metadata["hashCode"] = json!(hash_code);
+    }
+
     Ok(ToolResult {
         title,
-        metadata: json!({ "file": file, "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
+        metadata,
         output,
     })
+}
+
+pub fn file_hash_code(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(hash_bytes(&bytes))
+}
+
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn file_stamp(path: &Path) -> Result<FileStamp> {

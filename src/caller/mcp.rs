@@ -224,6 +224,7 @@ fn tools() -> Vec<Value> {
                     prop("mode", "string"),
                     prop("offset", "number"),
                     prop("limit", "number"),
+                    prop("hashCheckMode", "boolean"),
                 ],
             ),
             true,
@@ -272,16 +273,15 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "apply_patch",
-            "Apply opencode patch envelope",
-            schema(&["patchText"], &[prop("patchText", "string")]),
-            true,
-        ),
-        executor_tool(
-            "diffy",
-            "Apply standard unified/git diff",
+            "Apply a single-file line patch using replace/delete/insert; pass filePath separately and optionally set hashCheckMode with hashCode",
             schema(
-                &["patchText"],
-                &[prop("patchText", "string"), prop("strip", "number")],
+                &["filePath", "patchText"],
+                &[
+                    prop("filePath", "string"),
+                    prop("patchText", "string"),
+                    prop("hashCheckMode", "boolean"),
+                    prop("hashCode", "string"),
+                ],
             ),
             true,
         ),

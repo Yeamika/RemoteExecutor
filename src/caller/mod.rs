@@ -380,7 +380,7 @@ fn is_set_default_executor(method: &str) -> bool {
 }
 
 fn is_write_method(method: &str) -> bool {
-    matches!(method, "apply_patch" | "diffy")
+    method == "apply_patch"
 }
 
 fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {

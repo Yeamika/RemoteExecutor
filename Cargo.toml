@@ -1,6 +1,6 @@
 [package]
 name = "remote_executor"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 # Keep this project independent from the vendored pty-t workspace.
@@ -33,6 +33,7 @@ pty_t_core = { path = "vendor/pty-t/crates/core" }
 pty_t_protocol = { path = "vendor/pty-t/crates/protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 shell-words = "1.1.1"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.29"

@@ -8,7 +8,7 @@ Modules:
 - `Caller`: stdio/tool front door that manages multiple Executors.
 - `ShellManager`: controlled PTY/session manager with a `ptyt`-compatible WebSocket endpoint.
 - `fs_ops`: opencode-style `glob`, `grep`, and `read` helpers. Search is backed by ripgrep crates, not an external `rg` binary.
-- `patch`: standard unified diff application via `diffy` plus opencode-style `apply_patch` support.
+- `patch`: single-file line-number patch support through `apply_patch`.
 
 Run a standalone Executor node:
 
@@ -20,7 +20,7 @@ The same `--listen` endpoint now accepts both Caller tool requests and `pty-t` c
 
 Release packages include GNU Linux builds plus musl static Linux builds. Use the `*-musl-static` packages for older distributions such as Ubuntu 18 or minimal buildroot-style systems where newer glibc dependencies are a problem. For 32-bit systems, use `remote-executor-linux-i686-musl-static` on x86 and try `remote-executor-linux-armv7-musl-static` first on ARM SoC boards.
 
-`read` and `stat` return `metadata.file` as a FileStamp: `fileKey`, `canonicalPath`, `kind`, and optional `size`/`mtimeMs`. Callers should compare `<executor>:<fileKey>` instead of path strings when checking whether a file was read before write/edit.
+`read` and `stat` return `metadata.file` as a FileStamp: `fileKey`, `canonicalPath`, `kind`, and optional `size`/`mtimeMs`. With `hashCheckMode: true`, `read` also returns `hashCode` as a full SHA-256 digest for the file bytes.
 
 ```bash
 cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001 --pty main
@@ -46,13 +46,14 @@ cargo run --bin remote-caller-mcp
 
 The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`. The request field is `tool`; `method` is not accepted for Caller/Executor tool calls.
 The MCP wrapper speaks JSON-RPC over stdio and exposes the same Caller/Executor tools through `tools/list` and `tools/call`.
-Small tools (`read`, `glob`, `grep`, `apply_patch`, `diffy`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
+Small tools (`read`, `glob`, `grep`, `apply_patch`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
 Stdio requests are handled concurrently in the same process. Write operations are not queued: if a write operation is already running, another write operation returns an error immediately.
 
 Patch tools:
 
-- `diffy`: applies standard unified/git diffs, for example `{ "id": 1, "tool": "diffy", "params": { "patchText": "--- a/file\n+++ b/file\n@@ ..." } }`.
-- `apply_patch`: applies opencode's `*** Begin Patch` envelope format.
+- `apply_patch`: applies a single-file line-number patch. Parameters: `filePath`, `patchText`, optional `hashCheckMode`, optional `hashCode`. When `hashCheckMode` is true, the current file hash must match `hashCode`, and the result returns the new full `hashCode`.
+
+Line patch syntax uses original 1-based line numbers. Hunk headers are `replace A B`, `delete A B`, and `insert N`; `insert 0` inserts at the start, `insert -1` inserts at the end, and `insert N` for positive N inserts after original line N. Body lines are `+text` for new text and `copy A B` to reuse original lines. Example: `{ "tool": "apply_patch", "params": { "filePath": "src/foo.rs", "patchText": "replace 11 11\n+new line", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
 
 Caller tools:
 

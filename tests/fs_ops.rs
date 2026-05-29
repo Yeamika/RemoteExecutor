@@ -1,6 +1,6 @@
 use remote_executor::{
-    apply_diffy, apply_patch, glob_paths, read_path, stat_path, ApplyOptions, DiffOptions,
-    GlobOptions, ReadMode, ReadOptions, StatOptions, ToolContext,
+    apply_patch, glob_paths, read_path, stat_path, ApplyOptions, GlobOptions, ReadMode,
+    ReadOptions, StatOptions, ToolContext,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -25,31 +25,6 @@ fn glob_paths_uses_pattern_matching() {
     assert!(output.output.contains("a.rs"));
 }
 
-#[tokio::test]
-async fn apply_patch_can_write_and_update_binary() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("file.bin");
-
-    let write = format!(
-        "*** Begin Patch\n*** Binary Write File: {}\n+00 01 02 03\n*** End Patch\n",
-        path.display()
-    );
-    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
-    apply_patch(ApplyOptions { patch_text: write }, &ctx)
-        .await
-        .unwrap();
-    assert_eq!(fs::read(&path).unwrap(), [0x00, 0x01, 0x02, 0x03]);
-
-    let update = format!(
-        "*** Begin Patch\n*** Binary Update File: {}\n*** Offset: 1\n*** Old Bytes: 01 02\n*** New Bytes: AA BB CC\n*** End Patch\n",
-        path.display()
-    );
-    apply_patch(ApplyOptions { patch_text: update }, &ctx)
-        .await
-        .unwrap();
-    assert_eq!(fs::read(&path).unwrap(), [0x00, 0xAA, 0xBB, 0xCC, 0x03]);
-}
-
 #[test]
 fn read_path_reports_binary_offset_and_byte() {
     let dir = tempdir().unwrap();
@@ -63,6 +38,7 @@ fn read_path_reports_binary_offset_and_byte() {
             mode: None,
             offset: None,
             limit: None,
+            hash_check_mode: false,
         },
         &ctx,
     )
@@ -86,6 +62,7 @@ fn read_path_binary_mode_returns_limited_hexdump() {
             mode: Some(ReadMode::Binary),
             offset: Some(1),
             limit: Some(999),
+            hash_check_mode: false,
         },
         &ctx,
     )
@@ -110,6 +87,7 @@ fn read_path_reads_file_with_lines() {
             mode: None,
             offset: Some(2),
             limit: Some(1),
+            hash_check_mode: false,
         },
         &ctx,
     )
@@ -140,6 +118,7 @@ fn stat_path_returns_file_stamp_for_files_and_missing_paths() {
             mode: None,
             offset: None,
             limit: None,
+            hash_check_mode: false,
         },
         &ctx,
     )
@@ -202,43 +181,117 @@ fn file_stamp_uses_physical_identity_for_hard_links() {
     );
 }
 
-#[tokio::test]
-async fn apply_patch_can_apply_patch() {
+#[test]
+fn read_path_returns_hash_code_when_requested() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("file.txt");
-    fs::write(&path, "before\n").unwrap();
-
-    let patch = format!(
-        "*** Begin Patch\n*** Update File: {}\n@@\n-before\n+after\n*** End Patch\n",
-        path.display()
-    );
+    let path = dir.path().join("sample.txt");
+    fs::write(&path, "one\ntwo\n").unwrap();
 
     let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
-    apply_patch(ApplyOptions { patch_text: patch }, &ctx)
-        .await
-        .unwrap();
+    let output = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            mode: None,
+            offset: Some(1),
+            limit: Some(1),
+            hash_check_mode: true,
+        },
+        &ctx,
+    )
+    .unwrap();
 
-    assert_eq!(fs::read_to_string(path).unwrap(), "after\n");
+    let hash_code = output.metadata["hashCode"].as_str().unwrap();
+    assert!(hash_code.starts_with("sha256:"));
+    assert_eq!(hash_code.len(), "sha256:".len() + 64);
+    assert!(output.output.contains(hash_code));
 }
 
 #[tokio::test]
-async fn diffy_can_apply_unified_diff() {
+async fn apply_patch_applies_line_number_patch_with_hash_check() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
-    fs::write(&path, "before\n").unwrap();
-
-    let patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    fs::write(&path, "one\ntwo\nthree\n").unwrap();
     let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+    let read = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            mode: None,
+            offset: None,
+            limit: None,
+            hash_check_mode: true,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let hash_code = read.metadata["hashCode"].as_str().unwrap().to_string();
 
-    apply_diffy(
-        DiffOptions {
-            patch_text: patch.to_string(),
-            strip: None,
+    let result = apply_patch(
+        ApplyOptions {
+            file_path: path.clone(),
+            patch_text: "replace 2 2\n+TWO\ninsert -1\n+four".to_string(),
+            hash_check_mode: true,
+            hash_code: Some(hash_code),
         },
         &ctx,
     )
     .await
     .unwrap();
 
-    assert_eq!(fs::read_to_string(path).unwrap(), "after\n");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "one\nTWO\nthree\nfour\n"
+    );
+    let new_hash = result.metadata["hashCode"].as_str().unwrap();
+    assert!(new_hash.starts_with("sha256:"));
+    assert!(result.output.contains(new_hash));
+}
+
+#[tokio::test]
+async fn apply_patch_rejects_stale_hash_without_writing() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    fs::write(&path, "one\ntwo\n").unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let err = apply_patch(
+        ApplyOptions {
+            file_path: path.clone(),
+            patch_text: "replace 2 2\n+TWO".to_string(),
+            hash_check_mode: true,
+            hash_code: Some(format!("sha256:{}", "0".repeat(64))),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("hash mismatch"), "{err}");
+    assert_eq!(fs::read_to_string(path).unwrap(), "one\ntwo\n");
+}
+
+#[tokio::test]
+async fn apply_patch_rejects_old_envelope_format() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    fs::write(&path, "before\n").unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let err = apply_patch(
+        ApplyOptions {
+            file_path: path.clone(),
+            patch_text:
+                "*** Begin Patch\n*** Update File: file.txt\n@@\n-before\n+after\n*** End Patch"
+                    .to_string(),
+            hash_check_mode: false,
+            hash_code: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("old apply_patch envelope"), "{err}");
+    assert_eq!(fs::read_to_string(path).unwrap(), "before\n");
 }

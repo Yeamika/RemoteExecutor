@@ -20,10 +20,10 @@ pub use executor::{
     ExecutorResponse,
 };
 pub use fs_ops::{
-    file_stamp, glob_paths, grep_paths, read_path, stat_path, FileKind, FileStamp, GlobOptions,
-    GrepOptions, ReadMode, ReadOptions, StatOptions,
+    file_hash_code, file_stamp, glob_paths, grep_paths, read_path, stat_path, FileKind, FileStamp,
+    GlobOptions, GrepOptions, ReadMode, ReadOptions, StatOptions,
 };
-pub use patch::{apply_diffy, apply_patch, ApplyOptions, DiffOptions, PatchFile};
+pub use patch::{apply_patch, ApplyOptions, PatchFile};
 pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 pub use shell_manager::ShellManager;
 pub use tool::{ToolContext, ToolResult};

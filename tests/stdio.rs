@@ -21,15 +21,16 @@ async fn stdio_dispatches_glob() {
 }
 
 #[tokio::test]
-async fn stdio_dispatches_diffy() {
+async fn stdio_dispatches_apply_patch() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "before\n").unwrap();
 
     let request = StdioRequest {
         id: json!(2),
-        method: "diffy".to_string(),
+        method: "apply_patch".to_string(),
         params: json!({
-            "patchText":"--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+            "filePath":"file.txt",
+            "patchText":"replace 1 1\n+after"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,
