@@ -13,10 +13,43 @@ pub struct ApplyOptions {
     pub file_path: PathBuf,
     #[serde(rename = "patchText")]
     pub patch_text: String,
+    #[serde(default, rename = "patchMode")]
+    pub patch_mode: PatchMode,
     #[serde(default, rename = "hashCheckMode")]
     pub hash_check_mode: bool,
     #[serde(default, rename = "hashCode")]
     pub hash_code: Option<String>,
+}
+
+fn binary_patch_file(ctx: &ToolContext, path: &Path, before: &[u8], after: &[u8]) -> PatchFile {
+    let before_hex = bytes_hex(before);
+    let after_hex = bytes_hex(after);
+    let diff = format!(
+        "Binary update: {}\n- {} bytes: {}\n+ {} bytes: {}\n",
+        path.display(),
+        before.len(),
+        before_hex,
+        after.len(),
+        after_hex
+    );
+    PatchFile {
+        file_path: path.to_string_lossy().into_owned(),
+        relative_path: ctx.title(path),
+        kind: "binary-update".to_string(),
+        diff,
+        before: before_hex,
+        after: after_hex,
+        additions: after.len(),
+        deletions: before.len(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PatchMode {
+    #[default]
+    Text,
+    Binary,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -76,6 +109,41 @@ struct Operation {
     order: usize,
 }
 
+#[derive(Clone, Debug)]
+struct BinaryHunk {
+    anchor: BinaryAnchor,
+    bytes: Vec<u8>,
+    order: usize,
+}
+
+#[derive(Clone, Debug)]
+enum BinaryAnchor {
+    Replace { offset: usize, len: ByteLen },
+    Delete { offset: usize, len: ByteLen },
+    Insert { target: BinaryInsertTarget },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ByteLen {
+    Count(usize),
+    Rest,
+}
+
+#[derive(Clone, Debug)]
+enum BinaryInsertTarget {
+    Start,
+    Offset(usize),
+    End,
+}
+
+#[derive(Clone, Debug)]
+struct BinaryOperation {
+    start: usize,
+    end: usize,
+    replacement: Vec<u8>,
+    order: usize,
+}
+
 pub async fn apply_patch(options: ApplyOptions, ctx: &ToolContext) -> Result<ToolResult> {
     if options.patch_text.trim().is_empty() {
         return Err(anyhow!("patchText is required"));
@@ -100,15 +168,46 @@ pub async fn apply_patch(options: ApplyOptions, ctx: &ToolContext) -> Result<Too
         }
     }
 
+    match options.patch_mode {
+        PatchMode::Text => apply_text_patch(ctx, &target, before_bytes, &options).await,
+        PatchMode::Binary => apply_binary_patch(ctx, &target, before_bytes, &options).await,
+    }
+}
+
+async fn apply_text_patch(
+    ctx: &ToolContext,
+    target: &Path,
+    before_bytes: Vec<u8>,
+    options: &ApplyOptions,
+) -> Result<ToolResult> {
     let shape = TextShape::from_bytes(before_bytes)?;
     let hunks = parse_line_patch(&options.patch_text)?;
     let after_text = apply_hunks(&shape.text, &hunks)?;
     let after_bytes = shape.encode(&after_text);
-    fs::write(&target, &after_bytes)
+    fs::write(target, &after_bytes)
         .with_context(|| format!("failed to write patch target {}", target.display()))?;
 
     let after_hash = hash_bytes(&after_bytes);
-    let file = patch_file(ctx, &target, &shape.text, &after_text);
+    let file = patch_file(ctx, target, &shape.text, &after_text);
+    Ok(result_from_file(
+        file,
+        options.hash_check_mode.then_some(after_hash),
+    ))
+}
+
+async fn apply_binary_patch(
+    ctx: &ToolContext,
+    target: &Path,
+    before_bytes: Vec<u8>,
+    options: &ApplyOptions,
+) -> Result<ToolResult> {
+    let hunks = parse_binary_patch(&options.patch_text)?;
+    let after_bytes = apply_binary_hunks(&before_bytes, &hunks)?;
+    fs::write(target, &after_bytes)
+        .with_context(|| format!("failed to write patch target {}", target.display()))?;
+
+    let after_hash = hash_bytes(&after_bytes);
+    let file = binary_patch_file(ctx, target, &before_bytes, &after_bytes);
     Ok(result_from_file(
         file,
         options.hash_check_mode.then_some(after_hash),
@@ -305,6 +404,201 @@ fn apply_hunks(text: &str, hunks: &[Hunk]) -> Result<String> {
     Ok(join_text_lines(&output, final_newline))
 }
 
+fn parse_binary_patch(patch_text: &str) -> Result<Vec<BinaryHunk>> {
+    if patch_text
+        .lines()
+        .any(|line| line.trim() == "*** Begin Patch")
+    {
+        return Err(anyhow!(
+            "old apply_patch envelope format is not supported; pass filePath separately and use binary patchText"
+        ));
+    }
+
+    let mut hunks = Vec::new();
+    let mut current: Option<BinaryHunk> = None;
+    for raw in patch_text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(anchor) = parse_binary_anchor(line)? {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current = Some(BinaryHunk {
+                anchor,
+                bytes: Vec::new(),
+                order: hunks.len(),
+            });
+            continue;
+        }
+
+        let Some(hunk) = current.as_mut() else {
+            return Err(anyhow!(
+                "binary patchText must start with a hunk header such as `replace 0 1`, `delete 0 1`, `insert 0`, or `insert -1`"
+            ));
+        };
+        if let Some(hex) = line.strip_prefix('+') {
+            hunk.bytes.extend(decode_hex(hex)?);
+        } else if line.starts_with("copy ") {
+            return Err(anyhow!(
+                "copy body lines are not supported in binary patch mode"
+            ));
+        } else {
+            return Err(anyhow!(
+                "unsupported binary patch body line `{line}`; body lines must start with `+`"
+            ));
+        }
+    }
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    if hunks.is_empty() {
+        return Err(anyhow!("patchText did not contain any hunks"));
+    }
+    for hunk in &hunks {
+        match hunk.anchor {
+            BinaryAnchor::Delete { .. } if !hunk.bytes.is_empty() => {
+                return Err(anyhow!("delete hunks cannot contain body lines"));
+            }
+            BinaryAnchor::Delete { .. } => {}
+            _ if hunk.bytes.is_empty() => {
+                return Err(anyhow!("non-delete binary hunks require at least one byte"));
+            }
+            _ => {}
+        }
+    }
+    Ok(hunks)
+}
+
+fn parse_binary_anchor(line: &str) -> Result<Option<BinaryAnchor>> {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["insert", offset] => Ok(Some(BinaryAnchor::Insert {
+            target: parse_binary_insert_target(offset)?,
+        })),
+        ["replace", offset, len] => Ok(Some(BinaryAnchor::Replace {
+            offset: parse_byte_offset(offset)?,
+            len: parse_byte_len(len)?,
+        })),
+        ["delete", offset, len] => Ok(Some(BinaryAnchor::Delete {
+            offset: parse_byte_offset(offset)?,
+            len: parse_byte_len(len)?,
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn parse_binary_insert_target(value: &str) -> Result<BinaryInsertTarget> {
+    if value == "0" {
+        return Ok(BinaryInsertTarget::Start);
+    }
+    if value == "-1" {
+        return Ok(BinaryInsertTarget::End);
+    }
+    Ok(BinaryInsertTarget::Offset(parse_byte_offset(value)?))
+}
+
+fn parse_byte_offset(value: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .with_context(|| format!("invalid byte offset `{value}`"))
+}
+
+fn parse_byte_len(value: &str) -> Result<ByteLen> {
+    if value == "-1" {
+        return Ok(ByteLen::Rest);
+    }
+    let len = value
+        .parse::<usize>()
+        .with_context(|| format!("invalid byte length `{value}`"))?;
+    if len == 0 {
+        return Err(anyhow!("byte length must be greater than 0"));
+    }
+    Ok(ByteLen::Count(len))
+}
+
+fn apply_binary_hunks(bytes: &[u8], hunks: &[BinaryHunk]) -> Result<Vec<u8>> {
+    let mut ops = hunks
+        .iter()
+        .map(|hunk| hunk_to_binary_operation(hunk, bytes.len()))
+        .collect::<Result<Vec<_>>>()?;
+    ops.sort_by_key(|op| (op.start, op.end > op.start, op.order));
+
+    let mut output = Vec::new();
+    let mut cursor = 0usize;
+    for op in ops {
+        if op.start < cursor {
+            return Err(anyhow!(
+                "binary patch hunks overlap or target already replaced bytes"
+            ));
+        }
+        output.extend_from_slice(&bytes[cursor..op.start]);
+        output.extend(op.replacement);
+        cursor = op.end;
+    }
+    output.extend_from_slice(&bytes[cursor..]);
+    Ok(output)
+}
+
+fn hunk_to_binary_operation(hunk: &BinaryHunk, total: usize) -> Result<BinaryOperation> {
+    let (start, end) = match hunk.anchor {
+        BinaryAnchor::Replace { offset, len } | BinaryAnchor::Delete { offset, len } => {
+            let end = byte_range_end(offset, len, total)?;
+            (offset, end)
+        }
+        BinaryAnchor::Insert {
+            target: BinaryInsertTarget::Start,
+        } => (0, 0),
+        BinaryAnchor::Insert {
+            target: BinaryInsertTarget::Offset(offset),
+        } => {
+            ensure_insert_offset(offset, total)?;
+            (offset, offset)
+        }
+        BinaryAnchor::Insert {
+            target: BinaryInsertTarget::End,
+        } => (total, total),
+    };
+
+    Ok(BinaryOperation {
+        start,
+        end,
+        replacement: hunk.bytes.clone(),
+        order: hunk.order,
+    })
+}
+
+fn byte_range_end(offset: usize, len: ByteLen, total: usize) -> Result<usize> {
+    if offset >= total {
+        return Err(anyhow!(
+            "byte offset {offset} is out of range for this file ({total} bytes)"
+        ));
+    }
+    match len {
+        ByteLen::Count(len) => offset
+            .checked_add(len)
+            .filter(|end| *end <= total)
+            .ok_or_else(|| {
+                anyhow!(
+                    "byte range {}..{} is out of range for this file ({total} bytes)",
+                    offset,
+                    offset.saturating_add(len)
+                )
+            }),
+        ByteLen::Rest => Ok(total),
+    }
+}
+
+fn ensure_insert_offset(offset: usize, total: usize) -> Result<()> {
+    if offset >= total {
+        return Err(anyhow!(
+            "insert offset {offset} is out of range for this file ({total} bytes); use insert 0 for the start or insert -1 for the end"
+        ));
+    }
+    Ok(())
+}
+
 fn hunk_to_operation(hunk: &Hunk, lines: &[String]) -> Result<Operation> {
     let (start, end) = match hunk.anchor {
         Anchor::Replace { start, end } => {
@@ -462,6 +756,45 @@ fn count_diff_lines(diff: &str, marker: char) -> usize {
         .filter(|line| line.starts_with(marker))
         .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
         .count()
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    const MAX: usize = 128;
+    let mut value = bytes
+        .iter()
+        .take(MAX)
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > MAX {
+        value.push_str(" ...");
+    }
+    value
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>> {
+    let compact = text
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.strip_prefix("0x")
+                .or_else(|| part.strip_prefix("0X"))
+                .unwrap_or(part)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if compact.len() % 2 != 0 {
+        return Err(anyhow!(
+            "hex byte content must contain an even number of digits"
+        ));
+    }
+    (0..compact.len())
+        .step_by(2)
+        .map(|idx| {
+            u8::from_str_radix(&compact[idx..idx + 2], 16)
+                .map_err(|err| anyhow!("invalid hex byte at digit {idx}: {err}"))
+        })
+        .collect()
 }
 
 fn binary_byte(bytes: &[u8]) -> Option<(usize, u8)> {

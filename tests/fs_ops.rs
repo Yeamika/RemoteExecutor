@@ -1,5 +1,5 @@
 use remote_executor::{
-    apply_patch, glob_paths, read_path, stat_path, ApplyOptions, GlobOptions, ReadMode,
+    apply_patch, glob_paths, read_path, stat_path, ApplyOptions, GlobOptions, PatchMode, ReadMode,
     ReadOptions, StatOptions, ToolContext,
 };
 use std::fs;
@@ -229,6 +229,7 @@ async fn apply_patch_applies_line_number_patch_with_hash_check() {
         ApplyOptions {
             file_path: path.clone(),
             patch_text: "replace 2 2\n+TWO\ninsert -1\n+four".to_string(),
+            patch_mode: PatchMode::Text,
             hash_check_mode: true,
             hash_code: Some(hash_code),
         },
@@ -247,6 +248,73 @@ async fn apply_patch_applies_line_number_patch_with_hash_check() {
 }
 
 #[tokio::test]
+async fn apply_patch_applies_binary_offset_patch_with_hash_check() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.bin");
+    fs::write(&path, [0x00, 0x01, 0x02, 0x03, 0x04]).unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+    let read = read_path(
+        ReadOptions {
+            file_path: path.clone(),
+            mode: Some(ReadMode::Binary),
+            offset: None,
+            limit: None,
+            hash_check_mode: true,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let hash_code = read.metadata["hashCode"].as_str().unwrap().to_string();
+
+    let result = apply_patch(
+        ApplyOptions {
+            file_path: path.clone(),
+            patch_text: "insert 0\n+FE\nreplace 1 2\n+AA BB\ndelete 4 1\ninsert -1\n+CC\n+DD"
+                .to_string(),
+            patch_mode: PatchMode::Binary,
+            hash_check_mode: true,
+            hash_code: Some(hash_code),
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        [0xFE, 0x00, 0xAA, 0xBB, 0x03, 0xCC, 0xDD]
+    );
+    let new_hash = result.metadata["hashCode"].as_str().unwrap();
+    assert!(new_hash.starts_with("sha256:"));
+    assert!(result.metadata["file"]["type"] == "binary-update");
+}
+
+#[tokio::test]
+async fn apply_patch_binary_rejects_copy_body_lines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.bin");
+    fs::write(&path, [0x00, 0x01]).unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let err = apply_patch(
+        ApplyOptions {
+            file_path: path.clone(),
+            patch_text: "replace 0 1\ncopy 0 1".to_string(),
+            patch_mode: PatchMode::Binary,
+            hash_check_mode: false,
+            hash_code: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("copy body lines are not supported"), "{err}");
+    assert_eq!(fs::read(path).unwrap(), [0x00, 0x01]);
+}
+
+#[tokio::test]
 async fn apply_patch_rejects_stale_hash_without_writing() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
@@ -257,6 +325,7 @@ async fn apply_patch_rejects_stale_hash_without_writing() {
         ApplyOptions {
             file_path: path.clone(),
             patch_text: "replace 2 2\n+TWO".to_string(),
+            patch_mode: PatchMode::Text,
             hash_check_mode: true,
             hash_code: Some(format!("sha256:{}", "0".repeat(64))),
         },
@@ -283,6 +352,7 @@ async fn apply_patch_rejects_old_envelope_format() {
             patch_text:
                 "*** Begin Patch\n*** Update File: file.txt\n@@\n-before\n+after\n*** End Patch"
                     .to_string(),
+            patch_mode: PatchMode::Text,
             hash_check_mode: false,
             hash_code: None,
         },

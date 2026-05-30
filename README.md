@@ -51,9 +51,11 @@ Stdio requests are handled concurrently in the same process. Write operations ar
 
 Patch tools:
 
-- `apply_patch`: applies a single-file line-number patch. Parameters: `filePath`, `patchText`, optional `hashCheckMode`, optional `hashCode`. When `hashCheckMode` is true, the current file hash must match `hashCode`, and the result returns the new full `hashCode`.
+- `apply_patch`: applies a single-file patch. Parameters: `filePath`, `patchText`, optional `patchMode` (`text` by default, or `binary`), optional `hashCheckMode`, optional `hashCode`. When `hashCheckMode` is true, the current file hash must match `hashCode`, and the result returns the new full `hashCode`.
 
-Line patch syntax uses original 1-based line numbers. Hunk headers are `replace A B`, `delete A B`, and `insert N`; `insert 0` inserts at the start, `insert -1` inserts at the end, and `insert N` for positive N inserts after original line N. Body lines are `+text` for new text and `copy A B` to reuse original lines. Example: `{ "tool": "apply_patch", "params": { "filePath": "src/foo.rs", "patchText": "replace 11 11\n+new line", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
+Text patch syntax uses original 1-based line numbers. Hunk headers are `replace A B`, `delete A B`, and `insert N`; `insert 0` inserts at the start, `insert -1` inserts at the end, and `insert N` for positive N inserts after original line N. Body lines are `+text` for new text and `copy A B` to reuse original lines. Example: `{ "tool": "apply_patch", "params": { "filePath": "src/foo.rs", "patchText": "replace 11 11\n+new line", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
+
+Binary patch syntax uses original 0-based byte offsets with `patchMode: "binary"`. Hunk headers are `replace OFFSET LEN`, `delete OFFSET LEN`, and `insert OFFSET`; `insert 0` inserts at the start, `insert -1` inserts at the end, and positive `insert OFFSET` inserts at that byte offset. Body lines are `+HEX`, and multiple body lines concatenate. Example: `{ "tool": "apply_patch", "params": { "filePath": "data.bin", "patchMode": "binary", "patchText": "replace 10 2\n+AA BB", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
 
 Caller tools:
 

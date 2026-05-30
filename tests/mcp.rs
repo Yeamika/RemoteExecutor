@@ -44,6 +44,7 @@ async fn mcp_initialize_and_lists_tools() {
         .unwrap();
     let apply_properties = &apply_patch["inputSchema"]["properties"];
     assert!(apply_properties.get("filePath").is_some());
+    assert!(apply_properties.get("patchMode").is_some());
     assert!(apply_properties.get("hashCode").is_some());
     assert!(!tools.iter().any(|tool| tool["name"] == "diffy"));
 

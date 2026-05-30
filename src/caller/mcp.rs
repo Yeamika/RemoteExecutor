@@ -273,12 +273,13 @@ fn tools() -> Vec<Value> {
         ),
         executor_tool(
             "apply_patch",
-            "Apply a single-file line patch using replace/delete/insert; pass filePath separately and optionally set hashCheckMode with hashCode",
+            "Apply a single-file patch using replace/delete/insert; patchMode is text by default or binary for byte-offset hex patches",
             schema(
                 &["filePath", "patchText"],
                 &[
                     prop("filePath", "string"),
                     prop("patchText", "string"),
+                    prop("patchMode", "string"),
                     prop("hashCheckMode", "boolean"),
                     prop("hashCode", "string"),
                 ],
