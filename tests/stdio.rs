@@ -1,4 +1,4 @@
-use remote_executor::{handle_request, run_stdio_io_with_caller, Caller, StdioRequest};
+use remote_executor::{handle_request, run_stdio_io_with_caller, Caller, Executor, StdioRequest};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,6 +42,75 @@ async fn stdio_dispatches_apply_patch() {
     assert_eq!(
         fs::read_to_string(dir.path().join("file.txt")).unwrap(),
         "after\n"
+    );
+}
+
+#[tokio::test]
+async fn executor_apply_patch_result_omits_full_file_contents() {
+    let dir = tempdir().unwrap();
+    let secret = "secret-line-that-should-not-be-returned-by-re";
+    let path = dir.path().join("file.txt");
+    fs::write(&path, long_file(secret)).unwrap();
+
+    let response = Executor::local("patch-result")
+        .handle(StdioRequest {
+            id: json!("re"),
+            method: "apply_patch".to_string(),
+            params: json!({
+                "filePath":"file.txt",
+                "patchText":"replace 1 1\n+ONE"
+            }),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    assert_patch_result_omits_full_file(response.result.unwrap(), secret);
+}
+
+#[tokio::test]
+async fn caller_apply_patch_result_omits_full_file_contents() {
+    let dir = tempdir().unwrap();
+    let secret = "secret-line-that-should-not-be-returned-by-rec";
+    let path = dir.path().join("file.txt");
+    fs::write(&path, long_file(secret)).unwrap();
+
+    let response = handle_request(StdioRequest {
+        id: json!("rec"),
+        method: "apply_patch".to_string(),
+        params: json!({
+            "filePath":"file.txt",
+            "patchText":"replace 1 1\n+ONE"
+        }),
+        directory: Some(dir.path().to_path_buf()),
+        executor: None,
+        tool_timeout_ms: None,
+    })
+    .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    assert_patch_result_omits_full_file(response.result.unwrap(), secret);
+}
+
+fn long_file(secret: &str) -> String {
+    let mut content = String::from("one\n");
+    for idx in 0..40 {
+        content.push_str(&format!("middle-{idx}\n"));
+    }
+    content.push_str(secret);
+    content.push('\n');
+    content
+}
+
+fn assert_patch_result_omits_full_file(result: serde_json::Value, secret: &str) {
+    assert!(result["metadata"]["file"].get("before").is_none());
+    assert!(result["metadata"]["file"].get("after").is_none());
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(
+        !encoded.contains(secret),
+        "patch result returned full file content"
     );
 }
 

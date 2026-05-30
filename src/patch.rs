@@ -37,8 +37,6 @@ fn binary_patch_file(ctx: &ToolContext, path: &Path, before: &[u8], after: &[u8]
         relative_path: ctx.title(path),
         kind: "binary-update".to_string(),
         diff,
-        before: before_hex,
-        after: after_hex,
         additions: after.len(),
         deletions: before.len(),
     }
@@ -61,8 +59,6 @@ pub struct PatchFile {
     #[serde(rename = "type")]
     pub kind: String,
     pub diff: String,
-    pub before: String,
-    pub after: String,
     pub additions: usize,
     pub deletions: usize,
 }
@@ -738,8 +734,6 @@ fn patch_file(ctx: &ToolContext, path: &Path, before: &str, after: &str) -> Patc
         relative_path: ctx.title(path),
         kind: "update".to_string(),
         diff,
-        before: before.to_string(),
-        after: after.to_string(),
         additions,
         deletions,
     }

@@ -245,6 +245,44 @@ async fn apply_patch_applies_line_number_patch_with_hash_check() {
     let new_hash = result.metadata["hashCode"].as_str().unwrap();
     assert!(new_hash.starts_with("sha256:"));
     assert!(result.output.contains(new_hash));
+    assert!(result.metadata["file"].get("before").is_none());
+    assert!(result.metadata["file"].get("after").is_none());
+}
+
+#[tokio::test]
+async fn apply_patch_result_does_not_return_full_file_contents() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    let tail = "secret-tail-line-that-should-not-be-returned";
+    let mut content = String::from("one\n");
+    for idx in 0..40 {
+        content.push_str(&format!("middle-{idx}\n"));
+    }
+    content.push_str(tail);
+    content.push('\n');
+    fs::write(&path, content).unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let result = apply_patch(
+        ApplyOptions {
+            file_path: path,
+            patch_text: "replace 1 1\n+ONE".to_string(),
+            patch_mode: PatchMode::Text,
+            hash_check_mode: false,
+            hash_code: None,
+        },
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let metadata = serde_json::to_string(&result.metadata).unwrap();
+    assert!(result.metadata["file"].get("before").is_none());
+    assert!(result.metadata["file"].get("after").is_none());
+    assert!(
+        !metadata.contains(tail),
+        "metadata returned full file content"
+    );
 }
 
 #[tokio::test]
@@ -287,6 +325,8 @@ async fn apply_patch_applies_binary_offset_patch_with_hash_check() {
     let new_hash = result.metadata["hashCode"].as_str().unwrap();
     assert!(new_hash.starts_with("sha256:"));
     assert!(result.metadata["file"]["type"] == "binary-update");
+    assert!(result.metadata["file"].get("before").is_none());
+    assert!(result.metadata["file"].get("after").is_none());
 }
 
 #[tokio::test]
