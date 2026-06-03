@@ -1,4 +1,11 @@
-use crate::{rg_matches, RgOptions, ToolContext, ToolResult};
+mod glob;
+mod read;
+mod stamp;
+mod stat;
+#[cfg(test)]
+mod test;
+
+use crate::{tool_output, tool_output_full, ToolContext, ToolResult};
 use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -14,7 +21,6 @@ const BINARY_READ_LIMIT: usize = 128;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated to 2000 chars)";
 const GLOB_LIMIT: usize = 100;
-const GREP_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GlobOptions {
@@ -25,7 +31,6 @@ pub struct GlobOptions {
 
 fn read_binary_file(
     path: &Path,
-    title: String,
     file: FileStamp,
     offset: usize,
     limit: usize,
@@ -44,61 +49,26 @@ fn read_binary_file(
     let slice = &bytes[offset..end];
     let truncated = end < bytes.len();
     let hex = hexdump(slice, offset);
-    let tail = if truncated {
+
+    let info = if truncated {
         format!(
-            "\n\n(Showing bytes {}-{} of {}. Use offset={} to continue.)",
-            offset,
+            "Showing bytes {offset}-{} of {}. Use offset={end} to continue.",
             end.saturating_sub(1),
-            bytes.len(),
-            end
+            bytes.len()
         )
     } else {
-        format!("\n\n(End of file - total {} bytes)", bytes.len())
+        format!("total {} bytes", bytes.len())
     };
-    let hash_output = hash_code
-        .as_ref()
-        .map(|value| format!("\n<hashCode>{value}</hashCode>"))
-        .unwrap_or_default();
-    let output = format!(
-        "<path>{}</path>\n<type>binary</type>{}\n<content encoding=\"hex\" offset=\"{}\" length=\"{}\" total=\"{}\">\n{}{}\n</content>",
-        path.display(),
-        hash_output,
-        offset,
-        slice.len(),
-        bytes.len(),
-        hex,
-        tail
-    );
-
-    let mut metadata = json!({
-        "file": file,
-        "mode": "binary",
-        "encoding": "hex",
-        "offset": offset,
-        "length": slice.len(),
-        "totalBytes": bytes.len(),
-        "truncated": truncated,
-        "preview": hex,
-        "loaded": []
-    });
+    let message = "";
+    let mut metadata = json!({ "file": file });
     if let Some(hash_code) = hash_code {
         metadata["hashCode"] = json!(hash_code);
     }
 
     Ok(ToolResult {
-        title,
         metadata,
-        output,
+        output: tool_output_full(message, hex, info),
     })
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct GrepOptions {
-    pub pattern: String,
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    #[serde(default)]
-    pub include: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -200,79 +170,13 @@ pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult>
     }
 
     Ok(ToolResult {
-        title: ctx.title(&search),
         metadata: json!({ "count": files.len(), "truncated": truncated }),
-        output: output.join("\n"),
-    })
-}
-
-pub async fn grep_paths(options: GrepOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    if options.pattern.is_empty() {
-        return Err(anyhow!("pattern is required"));
-    }
-
-    let search = options
-        .path
-        .as_ref()
-        .map(|path| ctx.resolve(path))
-        .unwrap_or_else(|| ctx.directory.clone());
-    let mut rg = RgOptions::new(options.pattern.clone()).root(search.clone());
-    if let Some(include) = options.include {
-        rg = rg.glob(include);
-    }
-    let mut matches = rg_matches(rg).await?;
-    matches.sort_by(|a, b| b.mod_time.cmp(&a.mod_time));
-
-    let total = matches.len();
-    let truncated = total > GREP_LIMIT;
-    let final_matches = matches.into_iter().take(GREP_LIMIT).collect::<Vec<_>>();
-
-    if final_matches.is_empty() {
-        return Ok(ToolResult {
-            title: options.pattern,
-            metadata: json!({ "matches": 0, "truncated": false }),
-            output: "No files found".to_string(),
-        });
-    }
-
-    let mut output = vec![format!(
-        "Found {total} matches{}",
-        if truncated {
-            format!(" (showing first {GREP_LIMIT})")
-        } else {
-            String::new()
-        }
-    )];
-    let mut current = String::new();
-    for hit in final_matches {
-        if current != hit.path {
-            if !current.is_empty() {
-                output.push(String::new());
-            }
-            current = hit.path.clone();
-            output.push(format!("{}:", hit.path));
-        }
-        let line = truncate_line(&hit.line);
-        output.push(format!("  Line {}: {line}", hit.line_number));
-    }
-    if truncated {
-        output.push(String::new());
-        output.push(format!(
-            "(Results truncated: showing {GREP_LIMIT} of {total} matches ({} hidden). Consider using a more specific path or pattern.)",
-            total - GREP_LIMIT
-        ));
-    }
-
-    Ok(ToolResult {
-        title: options.pattern,
-        metadata: json!({ "matches": total, "truncated": truncated }),
-        output: output.join("\n"),
+        output: tool_output(output.join("\n")),
     })
 }
 
 pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let filepath = ctx.resolve(&options.file_path);
-    let title = ctx.title(&filepath);
     let stat = fs::metadata(&filepath)
         .with_context(|| format!("File not found: {}", filepath.display()))?;
     let file = file_stamp_for_metadata(&filepath, &stat)?;
@@ -297,7 +201,6 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
         }
         return read_dir(
             &filepath,
-            title,
             file,
             options.offset.unwrap_or(1),
             options.limit.unwrap_or(DEFAULT_READ_LIMIT),
@@ -306,7 +209,6 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     if mode == ReadMode::Binary {
         return read_binary_file(
             &filepath,
-            title,
             file,
             options.offset.unwrap_or(0),
             options.limit.unwrap_or(BINARY_READ_LIMIT),
@@ -315,7 +217,6 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
     }
     read_file(
         &filepath,
-        title,
         file,
         options.offset.unwrap_or(1),
         options.limit.unwrap_or(DEFAULT_READ_LIMIT),
@@ -326,20 +227,35 @@ pub fn read_path(options: ReadOptions, ctx: &ToolContext) -> Result<ToolResult> 
 pub fn stat_path(options: StatOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let filepath = ctx.resolve(&options.file_path);
     let file = file_stamp(&filepath)?;
+    let output = format_file_stamp(&file);
     Ok(ToolResult {
-        title: ctx.title(&filepath),
         metadata: json!({ "file": file }),
-        output: serde_json::to_string_pretty(&file)?,
+        output: tool_output(output),
     })
 }
 
-fn read_dir(
-    path: &Path,
-    title: String,
-    file: FileStamp,
-    offset: usize,
-    limit: usize,
-) -> Result<ToolResult> {
+fn format_file_stamp(file: &FileStamp) -> String {
+    let kind = match file.kind {
+        FileKind::File => "file",
+        FileKind::Directory => "directory",
+        FileKind::Missing => "missing",
+        FileKind::Other => "other",
+    };
+    let mut lines = vec![
+        format!("kind: {kind}"),
+        format!("canonicalPath: {}", file.canonical_path),
+        format!("fileKey: {}", file.file_key),
+    ];
+    if let Some(size) = file.size {
+        lines.push(format!("size: {size}"));
+    }
+    if let Some(mtime_ms) = file.mtime_ms {
+        lines.push(format!("mtimeMs: {mtime_ms}"));
+    }
+    lines.join("\n")
+}
+
+fn read_dir(path: &Path, file: FileStamp, offset: usize, limit: usize) -> Result<ToolResult> {
     if offset < 1 {
         return Err(anyhow!("offset must be greater than or equal to 1"));
     }
@@ -363,34 +279,29 @@ fn read_dir(
         .take(limit)
         .cloned()
         .collect::<Vec<_>>();
-    let truncated = start + sliced.len() < entries.len();
-    let tail = if truncated {
+    let total_entries = entries.len();
+    let truncated = start + sliced.len() < total_entries;
+    let next_offset = truncated.then_some(offset + sliced.len());
+    let output = sliced.join("\n");
+
+    let info = if truncated {
         format!(
-            "\n(Showing {} of {} entries. Use 'offset' parameter to read beyond entry {})",
-            sliced.len(),
-            entries.len(),
-            offset + sliced.len()
+            "Showing entries {offset}-{} of {total_entries}. Use offset={} to continue.",
+            offset + sliced.len() - 1,
+            next_offset.unwrap_or(offset)
         )
     } else {
-        format!("\n({} entries)", entries.len())
+        format!("total {total_entries} entries")
     };
-    let output = format!(
-        "<path>{}</path>\n<type>directory</type>\n<entries>\n{}{}\n</entries>",
-        path.display(),
-        sliced.join("\n"),
-        tail
-    );
-
+    let message = "";
     Ok(ToolResult {
-        title,
-        metadata: json!({ "file": file, "preview": sliced.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] }),
-        output,
+        metadata: json!({ "file": file }),
+        output: tool_output_full(message, output, info),
     })
 }
 
 fn read_file(
     path: &Path,
-    title: String,
     file: FileStamp,
     offset: usize,
     limit: usize,
@@ -428,34 +339,32 @@ fn read_file(
         .collect::<Vec<_>>();
     let last = offset + raw.len().saturating_sub(1);
     let truncated = start + raw.len() < lines.len();
-    let mut output = format!("<path>{}</path>\n<type>file</type>", path.display());
-    if let Some(hash_code) = &hash_code {
-        output.push_str(&format!("\n<hashCode>{hash_code}</hashCode>"));
-    }
-    output.push_str("\n<content>");
-    for (idx, line) in raw.iter().enumerate() {
-        output.push_str(&format!("\n{}: {line}", offset + idx));
-    }
-    if truncated {
-        output.push_str(&format!(
-            "\n\n(Showing lines {offset}-{last} of {}. Use offset={} to continue.)",
-            lines.len(),
-            last + 1
-        ));
-    } else {
-        output.push_str(&format!("\n\n(End of file - total {} lines)", lines.len()));
-    }
-    output.push_str("\n</content>");
+    let output = raw
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| format!("{}: {line}", offset + idx))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let next_offset = truncated.then_some(last + 1);
 
-    let mut metadata = json!({ "file": file, "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"), "truncated": truncated, "loaded": [] });
+    let info = if truncated {
+        format!(
+            "Showing lines {offset}-{last} of {}. Use offset={} to continue.",
+            lines.len(),
+            next_offset.unwrap_or(last + 1)
+        )
+    } else {
+        format!("total {} lines", lines.len())
+    };
+    let message = "";
+    let mut metadata = json!({ "file": file });
     if let Some(hash_code) = hash_code {
         metadata["hashCode"] = json!(hash_code);
     }
 
     Ok(ToolResult {
-        title,
         metadata,
-        output,
+        output: tool_output_full(message, output, info),
     })
 }
 
@@ -463,7 +372,6 @@ pub fn file_hash_code(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(hash_bytes(&bytes))
 }
-
 pub fn hash_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{}", hex_lower(&digest))

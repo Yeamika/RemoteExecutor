@@ -1,11 +1,21 @@
 mod mcp;
+mod state;
+mod stdio;
+
+#[cfg(test)]
+mod mcp_test;
+#[cfg(test)]
+mod stdio_test;
+#[cfg(test)]
+mod test;
 
 use crate::{
-    start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest, ExecutorResponse,
-    ShellManager, ToolResult,
+    start_shared_executor_ws, tool_output, Executor, ExecutorInfo, ExecutorRequest,
+    ExecutorResponse, SettingsStore, ShellManager, ToolResult,
 };
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
+use pty_t_core::TermSize;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -25,6 +35,7 @@ pub type StdioResponse = ExecutorResponse;
 
 pub use mcp::{
     handle_mcp_message, run_mcp_stdio, run_mcp_stdio_io_with_caller, run_mcp_stdio_with_caller,
+    run_mcp_stdio_with_settings_path,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -64,9 +75,23 @@ struct ExecutorEndpoint {
 
 impl Caller {
     pub async fn new() -> Result<Self> {
-        let shell_manager = ShellManager::default_shell(80, 24);
-        shell_manager.create_bash("main")?;
-        let local = Executor::local("local").with_shell_manager(shell_manager.clone());
+        Self::new_with_settings(None).await
+    }
+
+    pub async fn new_with_settings(settings_path: Option<std::path::PathBuf>) -> Result<Self> {
+        let settings = SettingsStore::load(settings_path)?;
+        Self::new_with_settings_store(settings).await
+    }
+
+    pub async fn new_with_settings_store(settings: SettingsStore) -> Result<Self> {
+        let shell_manager = ShellManager::new(
+            settings.interactive_command_spec()?,
+            TermSize { cols: 80, rows: 24 },
+        );
+        shell_manager.create_pty("main", settings.interactive_command_spec()?, None, None)?;
+        let local = Executor::local("local")
+            .with_shell_manager(shell_manager.clone())
+            .with_settings_store(settings);
         let local_info = local.info().clone();
         let local_addr = start_shared_executor_ws("127.0.0.1:0", local, shell_manager)?;
         let local_endpoint = ExecutorEndpoint {
@@ -184,9 +209,8 @@ impl Caller {
             "executors": executors,
         });
         ToolResult {
-            title: "Executors listed".to_string(),
             metadata: value.clone(),
-            output: serde_json::to_string_pretty(&value).unwrap_or_default(),
+            output: tool_output(serde_json::to_string_pretty(&value).unwrap_or_default()),
         }
     }
 
@@ -243,7 +267,11 @@ impl ExecutorEndpoint {
 }
 
 pub async fn run_stdio() -> Result<()> {
-    let caller = Caller::new().await?;
+    run_stdio_with_settings_path(None).await
+}
+
+pub async fn run_stdio_with_settings_path(settings_path: Option<std::path::PathBuf>) -> Result<()> {
+    let caller = Caller::new_with_settings(settings_path).await?;
     run_stdio_with_caller(caller).await
 }
 
@@ -367,6 +395,19 @@ fn normalize_ws_url(url: &str) -> String {
     }
 }
 
+fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {
+    if request.method == "exbash" {
+        let read_timeout = request
+            .params
+            .get("read_timeout")
+            .and_then(Value::as_u64)
+            .unwrap_or(10_000);
+        return read_timeout.saturating_add(EXBASH_TIMEOUT_BUFFER_MS);
+    }
+
+    DEFAULT_CALL_TIMEOUT_MS
+}
+
 fn is_list_executor(method: &str) -> bool {
     method == "list_executor"
 }
@@ -380,21 +421,5 @@ fn is_set_default_executor(method: &str) -> bool {
 }
 
 fn is_write_method(method: &str) -> bool {
-    method == "apply_patch"
-}
-
-fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {
-    if matches!(
-        request.method.as_str(),
-        "exbash" | "exbash_shell" | "exbash_attach"
-    ) {
-        let read_timeout = request
-            .params
-            .get("read_timeout")
-            .and_then(Value::as_u64)
-            .unwrap_or(10_000);
-        return read_timeout.saturating_add(EXBASH_TIMEOUT_BUFFER_MS);
-    }
-
-    DEFAULT_CALL_TIMEOUT_MS
+    matches!(method, "FileAction" | "set_default_shell")
 }

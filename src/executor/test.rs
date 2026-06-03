@@ -1,8 +1,6 @@
+use crate::{start_shared_executor_ws, Executor, ExecutorRequest, ExecutorResponse, ShellManager};
 use futures_util::{SinkExt, StreamExt};
 use pty_t_protocol::{AdminText, ClientText, ServerText};
-use remote_executor::{
-    start_shared_executor_ws, Executor, ExecutorRequest, ExecutorResponse, ShellManager,
-};
 use serde_json::json;
 use std::fs;
 use tempfile::tempdir;
@@ -76,7 +74,7 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
     let request = ExecutorRequest {
         id: json!(10),
         method: "exbash".to_string(),
-        params: json!({
+        params: json!({"mode":"run",
             "command": command,
             "description":"visible pty exbash",
             "read_timeout":0
@@ -119,8 +117,8 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
 
     let stop = ExecutorRequest {
         id: json!(11),
-        method: "exbash_stop".to_string(),
-        params: json!({"asyncID":async_id.clone()}),
+        method: "exbash".to_string(),
+        params: json!({"mode":"stop","asyncID":async_id.clone()}),
         directory: None,
         executor: None,
         tool_timeout_ms: None,
@@ -133,8 +131,8 @@ async fn shared_endpoint_exbash_sessions_are_visible_to_pty_clients() {
 
     let remove = ExecutorRequest {
         id: json!(12),
-        method: "exbash_remove".to_string(),
-        params: json!({"asyncID":async_id}),
+        method: "exbash".to_string(),
+        params: json!({"mode":"remove","asyncID":async_id}),
         directory: None,
         executor: None,
         tool_timeout_ms: None,
@@ -164,7 +162,7 @@ async fn shared_endpoint_meta_reports_pty_exit_code() {
     let request = ExecutorRequest {
         id: json!(20),
         method: "exbash".to_string(),
-        params: json!({
+        params: json!({"mode":"run",
             "command":"bash -lc 'sleep 0.1; exit 7'",
             "read_timeout":0
         }),
@@ -245,7 +243,7 @@ async fn shared_endpoint_meta_reports_pty_exit_code() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn exbash_remove_closes_connected_pty_client() {
+async fn exbash_mode_remove_closes_connected_pty_client() {
     let manager = ShellManager::default_shell(80, 24);
     let addr = start_shared_executor_ws(
         "127.0.0.1:0",
@@ -259,8 +257,8 @@ async fn exbash_remove_closes_connected_pty_client() {
     let request = ExecutorRequest {
         id: json!(30),
         method: "exbash".to_string(),
-        params: json!({
-            "command":"bash -lc 'printf done'",
+        params: json!({"mode":"run",
+            "command":"bash -lc 'printf done; sleep 5'",
             "read_timeout":0
         }),
         directory: None,
@@ -318,8 +316,8 @@ async fn exbash_remove_closes_connected_pty_client() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let remove = ExecutorRequest {
         id: json!(31),
-        method: "exbash_remove".to_string(),
-        params: json!({"asyncID":async_id}),
+        method: "exbash".to_string(),
+        params: json!({"mode":"remove","asyncID":async_id}),
         directory: None,
         executor: None,
         tool_timeout_ms: None,

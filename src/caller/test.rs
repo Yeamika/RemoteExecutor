@@ -1,9 +1,9 @@
-use futures_util::{SinkExt, StreamExt};
-use pty_t_protocol::{AdminText, ServerText};
-use remote_executor::{
+use crate::{
     start_shared_executor_ws, Caller, ConnectExecutorOptions, Executor, ExecutorRequest,
     ShellManager,
 };
+use futures_util::{SinkExt, StreamExt};
+use pty_t_protocol::{AdminText, ServerText};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -140,6 +140,70 @@ async fn caller_routes_to_connected_executor() {
 }
 
 #[tokio::test]
+async fn caller_routes_remote_executor_across_multiple_directories() {
+    let root = tempdir().unwrap();
+    let alpha = root.path().join("alpha");
+    let beta = root.path().join("beta");
+    fs::create_dir_all(&alpha).unwrap();
+    fs::create_dir_all(&beta).unwrap();
+    fs::write(alpha.join("same.txt"), "alpha\n").unwrap();
+    fs::write(beta.join("same.txt"), "beta\n").unwrap();
+
+    let addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("remote-folders"),
+        ShellManager::default_shell(80, 24),
+    )
+    .unwrap();
+    let caller = Caller::new().await.unwrap();
+    caller
+        .connect_to_executor(ConnectExecutorOptions {
+            id: "remote-folders".to_string(),
+            url: format!("ws://{addr}"),
+            system: Some("test".to_string()),
+            device: Some("remote-device".to_string()),
+            labels: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+
+    let alpha_response = caller
+        .handle(ExecutorRequest {
+            id: json!("alpha-read"),
+            method: "read".to_string(),
+            params: json!({"filePath":"same.txt"}),
+            directory: Some(alpha.clone()),
+            executor: Some("remote-folders".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(alpha_response.ok, "{:?}", alpha_response.error);
+    assert_eq!(alpha_response.executor.as_deref(), Some("remote-folders"));
+    assert!(alpha_response.result.unwrap().to_string().contains("alpha"));
+
+    let patch_response = caller
+        .handle(ExecutorRequest {
+            id: json!("beta-patch"),
+            method: "FileAction".to_string(),
+            params: json!({
+                "mode":"patch",
+                "filePath":"same.txt",
+                "patchText":"@@ -1 +1 @@\n-beta\n+BETA\n"
+            }),
+            directory: Some(beta.clone()),
+            executor: Some("remote-folders".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(patch_response.ok, "{:?}", patch_response.error);
+    assert_eq!(
+        fs::read_to_string(alpha.join("same.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(fs::read_to_string(beta.join("same.txt")).unwrap(), "BETA\n");
+}
+
+#[tokio::test]
 async fn caller_allows_exbash_read_timeout_over_default_rpc_timeout() {
     let manager = ShellManager::default_shell(80, 24);
     let addr = start_shared_executor_ws(
@@ -165,7 +229,7 @@ async fn caller_allows_exbash_read_timeout_over_default_rpc_timeout() {
         .handle(ExecutorRequest {
             id: json!("long-read-timeout"),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo long-timeout-ok",
                 "read_timeout":31_000
             }),

@@ -2,14 +2,14 @@
 
 Remote execution building blocks backed by the vendored `pty-t` submodule.
 
-Modules:
+Source layout:
 
-- `Executor`: WS execution node for file tools, patch tools, and PTY-backed exbash tools.
-- `Caller`: stdio/tool front door that manages multiple Executors.
-- `ShellManager`: controlled PTY/session manager with a `ptyt`-compatible WebSocket endpoint.
-- `fs_ops`: opencode-style `glob`, `grep`, and `read` helpers. Search is backed by ripgrep crates, not an external `rg` binary.
-- `patch`: single-file line-number patch support through `apply_patch`.
-
+- `protocol.rs`: Executor request/response types and `ToolResult`.
+- `context.rs`: per-call `ToolContext`.
+- `executor/`: Executor API, dispatch, shared WebSocket endpoint, and adjacent tests.
+- `caller/`: Caller API, stdio/MCP front doors, executor state, and adjacent tests.
+- `tools/`: tool implementations for `fs`, `file_action`, `rg`, and `exbash`.
+- `settings/`: `.re-setting.json` loading, hot reload, and shell profile resolution.
 Run a standalone Executor node:
 
 ```bash
@@ -35,27 +35,29 @@ ptyt --url ws://host:9001 --pty main
 Run a Caller for the upper tool layer:
 
 ```bash
-cargo run --bin remote-caller
+cargo run --bin remote-caller -- --settings .re-setting.json
 ```
 
 Run the MCP stdio wrapper for Caller:
 
 ```bash
-cargo run --bin remote-caller-mcp
+cargo run --bin remote-caller-mcp -- --settings .re-setting.json
 ```
 
 The Caller stdio bridge accepts requests like `{ "id": 1, "tool": "read", "params": { ... } }` and returns `{ "id": 1, "ok": true, "result": { ... } }`. The request field is `tool`; `method` is not accepted for Caller/Executor tool calls.
 The MCP wrapper speaks JSON-RPC over stdio and exposes the same Caller/Executor tools through `tools/list` and `tools/call`.
-Small tools (`read`, `glob`, `grep`, `apply_patch`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
+Small tools (`read`, `glob`, `stat`, `FileAction`, `rg`) have a host-side timeout: default `5000ms`, maximum `600000ms`, configurable with `toolTimeoutMs`. Exbash tools are handled separately through their own timeout fields and run on the same PTY backend as terminal sessions.
 Stdio requests are handled concurrently in the same process. Write operations are not queued: if a write operation is already running, another write operation returns an error immediately.
 
-Patch tools:
+File actions:
 
-- `apply_patch`: applies a single-file patch. Parameters: `filePath`, `patchText`, optional `patchMode` (`text` by default, or `binary`), optional `hashCheckMode`, optional `hashCode`. When `hashCheckMode` is true, the current file hash must match `hashCode`, and the result returns the new full `hashCode`.
+- `FileAction`: creates, deletes, renames, or patches a single file. Parameters: `mode`, `filePath`, and mode-specific fields. When `hashCheckMode` is true, the current file hash must match `hashCode`, and mutating actions that leave a file return the new full `hashCode`.
 
-Text patch syntax uses original 1-based line numbers. Hunk headers are `replace A B`, `delete A B`, and `insert N`; `insert 0` inserts at the start, `insert -1` inserts at the end, and `insert N` for positive N inserts after original line N. Body lines are `+text` for new text and `copy A B` to reuse original lines. Example: `{ "tool": "apply_patch", "params": { "filePath": "src/foo.rs", "patchText": "replace 11 11\n+new line", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
+Patch mode uses `mode: "patch"`, `patchText`, optional `patchMode` (`text` by default, or `binary`), optional `hashCheckMode`, and optional `hashCode`. Text patch syntax uses original 1-based line numbers. Hunk headers are `replace A B`, `delete A B`, and `insert N`; `insert 0` inserts at the start, `insert -1` inserts at the end, and `insert N` for positive N inserts after original line N. Body lines are `+text` for new text and `copy A B` to reuse original lines. Example: `{ "tool": "FileAction", "params": { "mode": "patch", "filePath": "src/foo.rs", "patchText": "replace 11 11\n+new line", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
 
-Binary patch syntax uses original 0-based byte offsets with `patchMode: "binary"`. Hunk headers are `replace OFFSET LEN`, `delete OFFSET LEN`, and `insert OFFSET`; `insert 0` inserts at the start, `insert -1` inserts at the end, and positive `insert OFFSET` inserts at that byte offset. Body lines are `+HEX`, and multiple body lines concatenate. Example: `{ "tool": "apply_patch", "params": { "filePath": "data.bin", "patchMode": "binary", "patchText": "replace 10 2\n+AA BB", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
+Binary patch mode uses original 0-based byte offsets with `patchMode: "binary"`. Hunk headers are `replace OFFSET LEN`, `delete OFFSET LEN`, and `insert OFFSET`; `insert 0` inserts at the start, `insert -1` inserts at the end, and positive `insert OFFSET` inserts at that byte offset. Body lines are `+HEX`, and multiple body lines concatenate. Example: `{ "tool": "FileAction", "params": { "mode": "patch", "filePath": "data.bin", "patchMode": "binary", "patchText": "replace 10 2\n+AA BB", "hashCheckMode": true, "hashCode": "sha256:..." } }`.
+
+Create/delete/rename use `mode: "create"` with `content`, `mode: "delete"`, and `mode: "rename"` with `newFilePath` respectively.
 
 Caller tools:
 
@@ -63,14 +65,37 @@ Caller tools:
 - `connect_to_executor`
 - `set_default_executor`
 
-Exbash tools:
+- `set_default_shell`
+Exbash tool:
 
-- `exbash`: start a command directly, without shell wrapping, and read for `read_timeout` milliseconds before detaching; use `read_timeout: 0` to detach immediately. `timeout` is the optional total command runtime limit; omit it or set `timeout: -1`/`0` for no total limit.
-- `exbash_shell`: start a command through the platform shell (`sh -c` on Unix, `powershell.exe -Command` on Windows) with the same timeout behavior as `exbash`.
-- `exbash_list`: list runs.
-- `exbash_attach`: write text or file input, wait until `read_timeout`, and return a PTY snapshot.
-- `exbash_stop`: stop a run.
-- `exbash_remove`: stop a running run if needed, close connected PTY clients, and remove the run.
+- `exbash`: PTY-backed command control through `mode`.
+- `mode: "run"`: start a command directly and read for `read_timeout` milliseconds before detaching.
+- `mode: "shell"`: start a command through the configured shell profile. Pass `shell` to use a specific profile; omit it or pass an empty string to use `shells.default`.
+- `mode: "list"`: list runs.
+- `mode: "attach"`: write text or file input, wait until `read_timeout`, and return a PTY snapshot.
+- `mode: "stop"`: stop a run.
+- `mode: "remove"`: stop a running run if needed, close connected PTY clients, and remove the run.
+
+Shell settings:
+
+Programs load `.re-setting.json` from the startup directory by default; `--settings <path>` overrides that path. Settings are hot-reloaded when the file `mtime` or size changes. The shell section supports `default`, `interactive`, and named `profiles`; built-in profiles are `bash`, `python`, `node`, and `powershell`. Candidate paths are checked in order, relative candidates are resolved from the settings file directory, and bare names are resolved through `PATH`. `set_default_shell` updates `shells.default` on the target Executor and writes the settings file back.
+
+```json
+{
+  "version": 1,
+  "shells": {
+    "default": "auto",
+    "interactive": "auto",
+    "profiles": {
+      "python": {
+        "candidates": [".venv/bin/python", ".venv/Scripts/python.exe", "python3", "python"],
+        "commandArgs": ["-c", "{command}"],
+        "interactiveArgs": []
+      }
+    }
+  }
+}
+```
 
 Executors are addressed over WebSocket. The built-in `local` executor is started automatically by `Caller`.
 MCP calls can route to a specific Executor with the optional `targetExecutor` argument.
@@ -78,6 +103,6 @@ Caller-to-Executor connection/response timeout is an internal fixed default of `
 
 The WebSocket endpoint accepts terminal clients and read-only admin requests (`ptyt list`, `ptyt detail <pty>`). It rejects remote create/control/kill/listen/send operations.
 Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocket, so `ptyt`/`ptyc` clients can list and attach to them by `asyncID`.
-`exbash_attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot as plain text in `output`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. If `showRawPretty` is true, attach also includes `rawPretty` in metadata; it defaults to false. When attach sends input, it takes PTY controller as `rec:<asyncID>` and leaves that controller in place; if a ptyt/ptyc client takes control before `read_timeout`, attach fails immediately with `control lost: someone attached: <client-id>`. If the task already stopped, attach returns the final snapshot immediately and sets `message`, `state`, `exitCode`, and `inputFailed`; when input was requested, `message` starts with `input failed`. `exbash_stop` also returns a plain text snapshot in `output`; `exbash_remove` returns no output and marks `metadata.stopped` when it had to stop a running process before removal. It does not write log files or accept a tail-size argument.
-When RE kills a run because of total `timeout` or `exbash_stop`, `exitCode` is the string `"timeout"` or `"stopped"`; normal process exits still use numeric exit codes.
+`exbash` mode `attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot in `output.text`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. If `showRawPretty` is true, attach also includes `rawPretty` in metadata; it defaults to false. When attach sends input, it takes PTY controller as `rec:<asyncID>` and leaves that controller in place; if a ptyt/ptyc client takes control before `read_timeout`, attach fails immediately with `control lost: someone attached: <client-id>`. If the task already stopped, attach returns the final snapshot immediately, sets `state` and `exitCode` in metadata, and puts the status text in `output.message`; when input was requested, `output.message` starts with `input failed`. Mode `stop` also returns a plain text snapshot in `output.text`; mode `remove` returns `ok` in `output.text` with `metadata.ok = true`. It does not write log files or accept a tail-size argument.
+When RE kills a run because of total `timeout` or mode `stop`, `exitCode` is the string `"timeout"` or `"stopped"`; normal process exits still use numeric exit codes.
 `exbash` inputs are intentionally small: `command`, `filePath`, attach `text` (stdin content), and attach file contents are limited to 4096 bytes; `description` is limited to 100 bytes and `asyncID` is limited to 30 bytes. Oversized inputs are rejected.

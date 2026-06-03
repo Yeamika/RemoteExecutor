@@ -1,18 +1,29 @@
-use crate::fs_ops::hash_bytes;
-use crate::{ToolContext, ToolResult};
+mod binary_patch;
+mod options;
+mod result;
+#[cfg(test)]
+mod test;
+mod text_patch;
+
+use crate::{hash_bytes, tool_output, ToolContext, ToolResult};
 use anyhow::{anyhow, Context, Result};
-use diffy::create_patch as diffy_create_patch;
+use diffy::{apply as diffy_apply, create_patch as diffy_create_patch, Patch as DiffyPatch};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ApplyOptions {
+pub struct FileActionOptions {
+    pub mode: FileActionMode,
     #[serde(rename = "filePath")]
     pub file_path: PathBuf,
-    #[serde(rename = "patchText")]
-    pub patch_text: String,
+    #[serde(default, rename = "newFilePath")]
+    pub new_file_path: Option<PathBuf>,
+    #[serde(default, rename = "patchText")]
+    pub patch_text: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
     #[serde(default, rename = "patchMode")]
     pub patch_mode: PatchMode,
     #[serde(default, rename = "hashCheckMode")]
@@ -21,22 +32,22 @@ pub struct ApplyOptions {
     pub hash_code: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FileActionMode {
+    Patch,
+    Create,
+    Delete,
+    Rename,
+}
+
 fn binary_patch_file(ctx: &ToolContext, path: &Path, before: &[u8], after: &[u8]) -> PatchFile {
-    let before_hex = bytes_hex(before);
-    let after_hex = bytes_hex(after);
-    let diff = format!(
-        "Binary update: {}\n- {} bytes: {}\n+ {} bytes: {}\n",
-        path.display(),
-        before.len(),
-        before_hex,
-        after.len(),
-        after_hex
-    );
     PatchFile {
         file_path: path.to_string_lossy().into_owned(),
         relative_path: ctx.title(path),
+        new_file_path: None,
+        new_relative_path: None,
         kind: "binary-update".to_string(),
-        diff,
         additions: after.len(),
         deletions: before.len(),
     }
@@ -56,9 +67,12 @@ pub struct PatchFile {
     pub file_path: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
+    #[serde(rename = "newFilePath", skip_serializing_if = "Option::is_none")]
+    pub new_file_path: Option<String>,
+    #[serde(rename = "newRelativePath", skip_serializing_if = "Option::is_none")]
+    pub new_relative_path: Option<String>,
     #[serde(rename = "type")]
     pub kind: String,
-    pub diff: String,
     pub additions: usize,
     pub deletions: usize,
 }
@@ -68,41 +82,6 @@ struct TextShape {
     bom: bool,
     line_ending: &'static str,
     text: String,
-}
-
-#[derive(Clone, Debug)]
-struct Hunk {
-    anchor: Anchor,
-    body: Vec<BodyLine>,
-    order: usize,
-}
-
-#[derive(Clone, Debug)]
-enum Anchor {
-    Replace { start: usize, end: usize },
-    Delete { start: usize, end: usize },
-    Insert { target: InsertTarget },
-}
-
-#[derive(Clone, Debug)]
-enum InsertTarget {
-    Start,
-    After(usize),
-    End,
-}
-
-#[derive(Clone, Debug)]
-enum BodyLine {
-    Literal(String),
-    Copy { start: usize, end: usize },
-}
-
-#[derive(Clone, Debug)]
-struct Operation {
-    start: usize,
-    end: usize,
-    replacement: Vec<String>,
-    order: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -140,45 +119,114 @@ struct BinaryOperation {
     order: usize,
 }
 
-pub async fn apply_patch(options: ApplyOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    if options.patch_text.trim().is_empty() {
-        return Err(anyhow!("patchText is required"));
-    }
-    if options.hash_check_mode && options.hash_code.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(anyhow!("hashCode is required when hashCheckMode is true"));
-    }
-
+pub async fn file_action(options: FileActionOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let target = ctx.resolve(&options.file_path);
-    let before_bytes = fs::read(&target)
-        .with_context(|| format!("failed to read patch target {}", target.display()))?;
-    let before_hash = hash_bytes(&before_bytes);
-    if options.hash_check_mode {
-        let expected = normalize_hash_code(options.hash_code.as_deref().unwrap_or_default())?;
-        if expected != before_hash {
-            return Err(anyhow!(
-                "hash mismatch for {}: expected {}, current {}; re-read and retry",
-                target.display(),
-                expected,
-                before_hash
-            ));
+    match options.mode {
+        FileActionMode::Patch => patch_file_action(ctx, &target, &options).await,
+        FileActionMode::Create => create_file_action(ctx, &target, &options).await,
+        FileActionMode::Delete => delete_file_action(ctx, &target, &options).await,
+        FileActionMode::Rename => rename_file_action(ctx, &target, &options).await,
+    }
+}
+
+async fn patch_file_action(
+    ctx: &ToolContext,
+    target: &Path,
+    options: &FileActionOptions,
+) -> Result<ToolResult> {
+    let patch_text = options
+        .patch_text
+        .as_deref()
+        .ok_or_else(|| anyhow!("patchText is required for mode=patch"))?;
+    if patch_text.trim().is_empty() {
+        return Err(anyhow!("patchText is required for mode=patch"));
+    }
+    let before_bytes = read_existing_with_hash_check(target, options)?;
+    match options.patch_mode {
+        PatchMode::Text => apply_text_patch(ctx, target, before_bytes, patch_text, options).await,
+        PatchMode::Binary => {
+            apply_binary_patch(ctx, target, before_bytes, patch_text, options).await
         }
     }
+}
 
-    match options.patch_mode {
-        PatchMode::Text => apply_text_patch(ctx, &target, before_bytes, &options).await,
-        PatchMode::Binary => apply_binary_patch(ctx, &target, before_bytes, &options).await,
+async fn create_file_action(
+    ctx: &ToolContext,
+    target: &Path,
+    options: &FileActionOptions,
+) -> Result<ToolResult> {
+    if target.exists() {
+        return Err(anyhow!("cannot create existing file: {}", target.display()));
     }
+    let content = options
+        .content
+        .as_deref()
+        .ok_or_else(|| anyhow!("content is required for mode=create"))?;
+    let bytes = match options.patch_mode {
+        PatchMode::Text => content.as_bytes().to_vec(),
+        PatchMode::Binary => decode_hex(content)?,
+    };
+    fs::write(target, &bytes)
+        .with_context(|| format!("failed to create file {}", target.display()))?;
+    let file = action_file(ctx, target, "create", bytes.len(), 0);
+    Ok(result_from_file(
+        file,
+        options.hash_check_mode.then_some(hash_bytes(&bytes)),
+    ))
+}
+
+async fn delete_file_action(
+    ctx: &ToolContext,
+    target: &Path,
+    options: &FileActionOptions,
+) -> Result<ToolResult> {
+    let before = read_existing_with_hash_check(target, options)?;
+    fs::remove_file(target)
+        .with_context(|| format!("failed to delete file {}", target.display()))?;
+    let file = action_file(ctx, target, "delete", 0, before.len());
+    Ok(result_from_file(file, None))
+}
+
+async fn rename_file_action(
+    ctx: &ToolContext,
+    target: &Path,
+    options: &FileActionOptions,
+) -> Result<ToolResult> {
+    let before = read_existing_with_hash_check(target, options)?;
+    let new_path = options
+        .new_file_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("newFilePath is required for mode=rename"))?;
+    let new_path = ctx.resolve(new_path);
+    if new_path.exists() {
+        return Err(anyhow!(
+            "cannot rename over existing file: {}",
+            new_path.display()
+        ));
+    }
+    fs::rename(target, &new_path).with_context(|| {
+        format!(
+            "failed to rename file {} to {}",
+            target.display(),
+            new_path.display()
+        )
+    })?;
+    let file = rename_file(ctx, target, &new_path);
+    Ok(result_from_file(
+        file,
+        options.hash_check_mode.then_some(hash_bytes(&before)),
+    ))
 }
 
 async fn apply_text_patch(
     ctx: &ToolContext,
     target: &Path,
     before_bytes: Vec<u8>,
-    options: &ApplyOptions,
+    patch_text: &str,
+    options: &FileActionOptions,
 ) -> Result<ToolResult> {
     let shape = TextShape::from_bytes(before_bytes)?;
-    let hunks = parse_line_patch(&options.patch_text)?;
-    let after_text = apply_hunks(&shape.text, &hunks)?;
+    let after_text = apply_diffy_text_patch(&shape.text, patch_text)?;
     let after_bytes = shape.encode(&after_text);
     fs::write(target, &after_bytes)
         .with_context(|| format!("failed to write patch target {}", target.display()))?;
@@ -195,9 +243,10 @@ async fn apply_binary_patch(
     ctx: &ToolContext,
     target: &Path,
     before_bytes: Vec<u8>,
-    options: &ApplyOptions,
+    patch_text: &str,
+    options: &FileActionOptions,
 ) -> Result<ToolResult> {
-    let hunks = parse_binary_patch(&options.patch_text)?;
+    let hunks = parse_binary_patch(patch_text)?;
     let after_bytes = apply_binary_hunks(&before_bytes, &hunks)?;
     fs::write(target, &after_bytes)
         .with_context(|| format!("failed to write patch target {}", target.display()))?;
@@ -242,162 +291,66 @@ impl TextShape {
 }
 
 fn result_from_file(file: PatchFile, hash_code: Option<String>) -> ToolResult {
-    let mut output = format!("Success. Updated file:\nM {}", file.relative_path);
+    let mut output = match file.kind.as_str() {
+        "create" => format!("Success. Created file:\nC {}", file.relative_path),
+        "delete" => format!("Success. Deleted file:\nD {}", file.relative_path),
+        "rename" => format!(
+            "Success. Renamed file:\nR {} -> {}",
+            file.relative_path,
+            file.new_relative_path.as_deref().unwrap_or_default()
+        ),
+        _ => format!("Success. Updated file:\nM {}", file.relative_path),
+    };
     if let Some(hash_code) = &hash_code {
         output.push_str(&format!("\nhashCode: {hash_code}"));
     }
 
-    let mut metadata = json!({ "diff": file.diff, "file": file, "diagnostics": {} });
+    let mut metadata = json!({ "file": file, "diagnostics": {} });
     if let Some(hash_code) = hash_code {
         metadata["hashCode"] = Value::String(hash_code);
     }
 
     ToolResult {
-        title: output.clone(),
         metadata,
-        output,
+        output: tool_output(output),
     }
 }
 
-fn parse_line_patch(patch_text: &str) -> Result<Vec<Hunk>> {
+fn read_existing_with_hash_check(path: &Path, options: &FileActionOptions) -> Result<Vec<u8>> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read target file {}", path.display()))?;
+    if options.hash_check_mode {
+        let expected = normalize_hash_code(options.hash_code.as_deref().unwrap_or_default())?;
+        let current = hash_bytes(&bytes);
+        if expected != current {
+            return Err(anyhow!(
+                "hash mismatch for {}: expected {}, current {}; re-read and retry",
+                path.display(),
+                expected,
+                current
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+fn apply_diffy_text_patch(before_text: &str, patch_text: &str) -> Result<String> {
+    let trimmed = patch_text.trim_start();
     if patch_text
         .lines()
         .any(|line| line.trim() == "*** Begin Patch")
     {
-        return Err(anyhow!(
-            "old apply_patch envelope format is not supported; pass filePath separately and use line-number patchText"
-        ));
+        return Err(anyhow!("old patch envelope format is not supported"));
     }
-
-    let mut hunks = Vec::new();
-    let mut current: Option<Hunk> = None;
-    for raw in patch_text.lines() {
-        let line = raw.trim_end_matches('\r');
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(anchor) = parse_anchor(line)? {
-            if let Some(hunk) = current.take() {
-                hunks.push(hunk);
-            }
-            current = Some(Hunk {
-                anchor,
-                body: Vec::new(),
-                order: hunks.len(),
-            });
-            continue;
-        }
-
-        let Some(hunk) = current.as_mut() else {
-            return Err(anyhow!(
-                "patchText must start with a hunk header such as `replace 1 1`, `delete 1 1`, `insert 1`, or `insert -1`"
-            ));
-        };
-        if let Some(text) = line.strip_prefix('+') {
-            hunk.body.push(BodyLine::Literal(text.to_string()));
-        } else if let Some(range) = line.strip_prefix("copy ") {
-            let (start, end) = parse_copy_range(range.trim())?;
-            hunk.body.push(BodyLine::Copy { start, end });
-        } else {
-            return Err(anyhow!(
-                "unsupported patch body line `{line}`; body lines must start with `+` or `copy `"
-            ));
-        }
-    }
-    if let Some(hunk) = current {
-        hunks.push(hunk);
-    }
-    if hunks.is_empty() {
-        return Err(anyhow!("patchText did not contain any hunks"));
-    }
-    for hunk in &hunks {
-        match hunk.anchor {
-            Anchor::Delete { .. } if !hunk.body.is_empty() => {
-                return Err(anyhow!("delete hunks cannot contain body lines"));
-            }
-            Anchor::Delete { .. } => {}
-            _ if hunk.body.is_empty() => {
-                return Err(anyhow!("non-delete hunks require at least one body line"));
-            }
-            _ => {}
-        }
-    }
-    Ok(hunks)
-}
-
-fn parse_anchor(line: &str) -> Result<Option<Anchor>> {
-    let parts = line.split_whitespace().collect::<Vec<_>>();
-    match parts.as_slice() {
-        ["insert", line] => Ok(Some(Anchor::Insert {
-            target: parse_insert_target(line)?,
-        })),
-        ["replace", start, end] => Ok(Some(Anchor::Replace {
-            start: parse_line_number(start)?,
-            end: parse_line_number(end)?,
-        })),
-        ["delete", start, end] => Ok(Some(Anchor::Delete {
-            start: parse_line_number(start)?,
-            end: parse_line_number(end)?,
-        })),
-        _ => Ok(None),
-    }
-}
-
-fn parse_copy_range(value: &str) -> Result<(usize, usize)> {
-    let parts = value.split_whitespace().collect::<Vec<_>>();
-    let [start, end] = parts.as_slice() else {
-        return Err(anyhow!("copy body lines must be `copy A B`"));
+    let owned_patch;
+    let patch_source = if trimmed.starts_with("@@") {
+        owned_patch = format!("--- file\n+++ file\n{patch_text}");
+        owned_patch.as_str()
+    } else {
+        patch_text
     };
-    let start = parse_line_number(start.trim())?;
-    let end = parse_line_number(end.trim())?;
-    if start > end {
-        return Err(anyhow!("copy range start must be <= end: copy {value}"));
-    }
-    Ok((start, end))
-}
-
-fn parse_line_number(value: &str) -> Result<usize> {
-    let line = value
-        .parse::<usize>()
-        .with_context(|| format!("invalid line number `{value}`"))?;
-    if line == 0 {
-        return Err(anyhow!("line numbers are 1-based"));
-    }
-    Ok(line)
-}
-
-fn parse_insert_target(value: &str) -> Result<InsertTarget> {
-    if value == "0" {
-        return Ok(InsertTarget::Start);
-    }
-    if value == "-1" {
-        return Ok(InsertTarget::End);
-    }
-    Ok(InsertTarget::After(parse_line_number(value)?))
-}
-
-fn apply_hunks(text: &str, hunks: &[Hunk]) -> Result<String> {
-    let (lines, final_newline) = split_text_lines(text);
-    let mut ops = hunks
-        .iter()
-        .map(|hunk| hunk_to_operation(hunk, &lines))
-        .collect::<Result<Vec<_>>>()?;
-    ops.sort_by_key(|op| (op.start, op.end > op.start, op.order));
-
-    let mut output = Vec::new();
-    let mut cursor = 0usize;
-    for op in ops {
-        if op.start < cursor {
-            return Err(anyhow!(
-                "patch hunks overlap or target an already replaced line"
-            ));
-        }
-        output.extend_from_slice(&lines[cursor..op.start]);
-        output.extend(op.replacement);
-        cursor = op.end;
-    }
-    output.extend_from_slice(&lines[cursor..]);
-    Ok(join_text_lines(&output, final_newline))
+    let patch = DiffyPatch::from_str(patch_source).context("failed to parse unified diff patch")?;
+    diffy_apply(before_text, &patch).context("failed to apply unified diff patch")
 }
 
 fn parse_binary_patch(patch_text: &str) -> Result<Vec<BinaryHunk>> {
@@ -406,7 +359,7 @@ fn parse_binary_patch(patch_text: &str) -> Result<Vec<BinaryHunk>> {
         .any(|line| line.trim() == "*** Begin Patch")
     {
         return Err(anyhow!(
-            "old apply_patch envelope format is not supported; pass filePath separately and use binary patchText"
+            "old patch envelope format is not supported; pass filePath separately and use binary patchText"
         ));
     }
 
@@ -595,103 +548,6 @@ fn ensure_insert_offset(offset: usize, total: usize) -> Result<()> {
     Ok(())
 }
 
-fn hunk_to_operation(hunk: &Hunk, lines: &[String]) -> Result<Operation> {
-    let (start, end) = match hunk.anchor {
-        Anchor::Replace { start, end } => {
-            if start > end {
-                return Err(anyhow!("hunk range start must be <= end: {start} {end}"));
-            }
-            ensure_line_exists(start, lines.len())?;
-            ensure_line_exists(end, lines.len())?;
-            (start - 1, end)
-        }
-        Anchor::Delete { start, end } => {
-            if start > end {
-                return Err(anyhow!("hunk range start must be <= end: {start} {end}"));
-            }
-            ensure_line_exists(start, lines.len())?;
-            ensure_line_exists(end, lines.len())?;
-            (start - 1, end)
-        }
-        Anchor::Insert {
-            target: InsertTarget::Start,
-        } => (0, 0),
-        Anchor::Insert {
-            target: InsertTarget::After(line),
-        } => {
-            ensure_insert_line(line, lines.len())?;
-            (line, line)
-        }
-        Anchor::Insert {
-            target: InsertTarget::End,
-        } => {
-            let line = lines.len() + 1;
-            (line - 1, line - 1)
-        }
-    };
-
-    let mut replacement = Vec::new();
-    for body in &hunk.body {
-        match body {
-            BodyLine::Literal(text) => replacement.push(text.clone()),
-            BodyLine::Copy { start, end } => {
-                ensure_line_exists(*start, lines.len())?;
-                ensure_line_exists(*end, lines.len())?;
-                replacement.extend_from_slice(&lines[start - 1..*end]);
-            }
-        }
-    }
-
-    Ok(Operation {
-        start,
-        end,
-        replacement,
-        order: hunk.order,
-    })
-}
-
-fn ensure_line_exists(line: usize, total: usize) -> Result<()> {
-    if line > total {
-        return Err(anyhow!(
-            "line {line} is out of range for this file ({total} lines)"
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_insert_line(line: usize, total: usize) -> Result<()> {
-    if line > total {
-        return Err(anyhow!(
-            "insert line {line} is out of range for this file ({total} lines); use insert 0 for the start or insert -1 for the end"
-        ));
-    }
-    Ok(())
-}
-
-fn split_text_lines(text: &str) -> (Vec<String>, bool) {
-    let final_newline = text.ends_with('\n');
-    let body = if final_newline {
-        &text[..text.len().saturating_sub(1)]
-    } else {
-        text
-    };
-    if body.is_empty() {
-        return (Vec::new(), final_newline);
-    }
-    (
-        body.split('\n').map(str::to_string).collect(),
-        final_newline,
-    )
-}
-
-fn join_text_lines(lines: &[String], final_newline: bool) -> String {
-    let mut text = lines.join("\n");
-    if final_newline {
-        text.push('\n');
-    }
-    text
-}
-
 fn normalize_hash_code(value: &str) -> Result<String> {
     let trimmed = value.trim();
     let digest = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
@@ -733,12 +589,42 @@ fn patch_file(ctx: &ToolContext, path: &Path, before: &str, after: &str) -> Patc
         file_path: path.to_string_lossy().into_owned(),
         relative_path: ctx.title(path),
         kind: "update".to_string(),
-        diff,
+        new_file_path: None,
+        new_relative_path: None,
         additions,
         deletions,
     }
 }
 
+fn action_file(
+    ctx: &ToolContext,
+    path: &Path,
+    kind: &str,
+    additions: usize,
+    deletions: usize,
+) -> PatchFile {
+    PatchFile {
+        file_path: path.to_string_lossy().into_owned(),
+        relative_path: ctx.title(path),
+        new_file_path: None,
+        new_relative_path: None,
+        kind: kind.to_string(),
+        additions,
+        deletions,
+    }
+}
+
+fn rename_file(ctx: &ToolContext, from: &Path, to: &Path) -> PatchFile {
+    PatchFile {
+        file_path: from.to_string_lossy().into_owned(),
+        relative_path: ctx.title(from),
+        new_file_path: Some(to.to_string_lossy().into_owned()),
+        new_relative_path: Some(ctx.title(to)),
+        kind: "rename".to_string(),
+        additions: 0,
+        deletions: 0,
+    }
+}
 fn diff_text(path: &Path, before: &str, after: &str) -> String {
     let diff = diffy_create_patch(before, after).to_string();
     diff.replacen("--- original", &format!("--- {}", path.display()), 1)
@@ -750,20 +636,6 @@ fn count_diff_lines(diff: &str, marker: char) -> usize {
         .filter(|line| line.starts_with(marker))
         .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
         .count()
-}
-
-fn bytes_hex(bytes: &[u8]) -> String {
-    const MAX: usize = 128;
-    let mut value = bytes
-        .iter()
-        .take(MAX)
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if bytes.len() > MAX {
-        value.push_str(" ...");
-    }
-    value
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>> {
@@ -797,51 +669,4 @@ fn binary_byte(bytes: &[u8]) -> Option<(usize, u8)> {
         .take(4096)
         .enumerate()
         .find_map(|(idx, byte)| (*byte == 0).then_some((idx, *byte)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn line_patch_replaces_and_reuses_original_lines() {
-        let text = "a\nb\nc\n";
-        let hunks = parse_line_patch("replace 1 3\ncopy 1 1\n+B\ncopy 3 3").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "a\nB\nc\n");
-    }
-
-    #[test]
-    fn line_patch_deletes_empty_body_range() {
-        let text = "a\nb\nc\n";
-        let hunks = parse_line_patch("delete 2 2").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "a\nc\n");
-    }
-
-    #[test]
-    fn line_patch_preserves_missing_final_newline() {
-        let text = "a\nb";
-        let hunks = parse_line_patch("replace 2 2\n+B").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "a\nB");
-    }
-
-    #[test]
-    fn insert_minus_one_appends() {
-        let text = "a\nb\n";
-        let hunks = parse_line_patch("insert -1\n+c").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "a\nb\nc\n");
-    }
-
-    #[test]
-    fn insert_minus_one_appends_multiple_lines() {
-        let text = "a\nb\n";
-        let hunks = parse_line_patch("insert -1\n+c\n+d").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "a\nb\nc\nd\n");
-    }
-
-    #[test]
-    fn insert_zero_before_replaced_line_is_allowed() {
-        let text = "a\nb\n";
-        let hunks = parse_line_patch("replace 1 1\n+A\ninsert 0\n+top").unwrap();
-        assert_eq!(apply_hunks(text, &hunks).unwrap(), "top\nA\nb\n");
-    }
 }

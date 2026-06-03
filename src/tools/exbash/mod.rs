@@ -1,10 +1,19 @@
-use crate::exec_support::{
-    attach, clear_exit_code_label, clip, description, exit_code_display, exit_code_json,
-    format_run_details, input_data, list_run_details, manager, merge_json, remove_run, run_detail,
-    start_job, stop_run, wait_for_stop_with_output,
-};
-use crate::{ToolContext, ToolResult};
+mod attach;
+mod input;
+mod options;
+mod run;
+mod runs;
+
+#[cfg(test)]
+mod test;
+
+use crate::{tool_output, tool_output_full, ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
+use runs::{
+    attach, clear_exit_code_label, clip, exit_code_display, exit_code_json, format_run_details,
+    input_data, list_run_details, manager, merge_json, remove_run, run_detail, start_job, stop_run,
+    wait_for_stop_with_output,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
@@ -18,10 +27,12 @@ const ASYNC_ID_BYTES_LIMIT: usize = 30;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExbashOptions {
-    #[serde(skip)]
+    #[serde(default)]
     pub mode: Option<String>,
     #[serde(skip)]
     pub shell: bool,
+    #[serde(default, rename = "shell")]
+    pub shell_profile: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -36,13 +47,10 @@ pub struct ExbashOptions {
     pub text: Option<String>,
     #[serde(default, rename = "filePath")]
     pub file_path: Option<PathBuf>,
+    #[serde(default)]
+    pub workdir: Option<PathBuf>,
     #[serde(default, rename = "showRawPretty")]
     pub show_raw_pretty: bool,
-}
-
-pub async fn exbash_shell(mut options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    options.shell = true;
-    exbash(options, ctx).await
 }
 
 fn validate_optional_bytes(name: &str, value: Option<&str>, limit: usize) -> Result<()> {
@@ -72,9 +80,18 @@ impl ExbashOptions {
         )?;
         validate_optional_bytes("asyncID", self.async_id.as_deref(), ASYNC_ID_BYTES_LIMIT)?;
         validate_optional_bytes("text", self.text.as_deref(), INPUT_BYTES_LIMIT)?;
+        validate_optional_bytes("shell", self.shell_profile.as_deref(), INPUT_BYTES_LIMIT)?;
         if let Some(path) = self.file_path_input() {
             let value = path.to_string_lossy();
             validate_bytes("filePath", &value, INPUT_BYTES_LIMIT)?;
+        }
+        if let Some(path) = self
+            .workdir
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            let value = path.to_string_lossy();
+            validate_bytes("workdir", &value, INPUT_BYTES_LIMIT)?;
         }
         Ok(())
     }
@@ -106,29 +123,32 @@ pub struct ExbashOutput {
     pub timed_out: bool,
 }
 
-pub async fn exbash(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
+pub async fn exbash(mut options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     options.validate_input_limits()?;
-    match options.mode.as_deref() {
-        None => run_command(options, ctx).await,
-        Some("list") => list(options, ctx).await,
-        Some("attach") => attach_input(options, ctx).await,
-        Some("exbash_stop") => stop(options, ctx).await,
-        Some("exbash_remove") => remove(options, ctx).await,
-        Some(mode) => Err(anyhow!("unknown exbash mode: {mode}")),
+    match options.mode.as_deref().unwrap_or_default() {
+        "run" => run_command(options, ctx).await,
+        "shell" => {
+            options.shell = true;
+            run_command(options, ctx).await
+        }
+        "attach" => attach_input(options, ctx).await,
+        "list" => list(options, ctx).await,
+        "stop" => stop(options, ctx).await,
+        "remove" => remove(options, ctx).await,
+        "" => Err(anyhow!("exbash mode is required")),
+        mode => Err(anyhow!("unknown exbash mode: {mode}")),
     }
 }
 
 async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let read_timeout = options.read_timeout.unwrap_or(READ_TIMEOUT);
-    let description = description(&options);
     let mut job = start_job(&options, ctx).await?;
     if let Some((detail, output)) = wait_for_stop_with_output(&mut job, read_timeout).await? {
         job.manager.remove_pty(&job.async_id);
         clear_exit_code_label(&job.async_id);
         return Ok(ToolResult {
-            title: description.clone(),
-            metadata: json!({ "output": clip(&output), "exitCode": detail.exit_code, "description": description }),
-            output,
+            metadata: json!({ "output": clip(&output), "exitCode": detail.exit_code }),
+            output: tool_output(output),
         });
     }
 
@@ -141,11 +161,10 @@ async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRe
     let snapshot = job.manager.core().snapshot_pty_plain(&job.async_id)?;
     let mut value = serde_json::to_value(&detail)?;
     value["detached"] = json!(true);
-    value["read_timeout"] = json!(read_timeout);
+    let message = format!("{} detached", job.async_id);
     Ok(ToolResult {
-        title: description,
         metadata: value.clone(),
-        output: snapshot,
+        output: tool_output_full(message, snapshot, ""),
     })
 }
 
@@ -154,9 +173,8 @@ async fn list(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let runs = list_run_details(&manager, options.async_id.as_deref())?;
     let value = json!({ "runs": runs });
     Ok(ToolResult {
-        title: "Async runs listed".to_string(),
         metadata: value.clone(),
-        output: format_run_details(&runs),
+        output: tool_output(format_run_details(&runs)),
     })
 }
 
@@ -169,9 +187,8 @@ async fn stop(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let detail = stop_run(&manager, &id).await?;
     let output = manager.core().snapshot_pty_plain(&id)?;
     Ok(ToolResult {
-        title: "Async run stopped".to_string(),
         metadata: serde_json::to_value(&detail)?,
-        output,
+        output: tool_output(output),
     })
 }
 
@@ -181,18 +198,17 @@ async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult>
         .clone()
         .ok_or_else(|| anyhow!("asyncID is required"))?;
     let manager = manager(ctx)?;
-    let value = remove_run(&manager, &id).await?;
+    remove_run(&manager, &id).await?;
     Ok(ToolResult {
-        title: "Async run removed".to_string(),
-        metadata: value.clone(),
-        output: String::new(),
+        metadata: json!({ "ok": true }),
+        output: tool_output("ok"),
     })
 }
 
 async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     if options.timeout.is_some() {
         return Err(anyhow!(
-            "read_timeout is required instead of timeout for exbash_attach"
+            "read_timeout is required instead of timeout for mode attach"
         ));
     }
 
@@ -210,20 +226,16 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
             exit_code_json(&id, Some(exit_code)).unwrap_or_else(|| json!(exit_code));
         let mut value = json!({
             "asyncID": id,
-            "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
             "wrote": 0,
             "source": requested_input_source(&options),
             "outputBytes": detail.output_history_bytes,
             "state": "stopped",
             "exitCode": exit_code_value,
-            "inputFailed": input_failed,
-            "message": message,
         });
         add_raw_pretty(&manager, &id, &mut value, options.show_raw_pretty)?;
         return Ok(ToolResult {
-            title: "Async run stopped".to_string(),
             metadata: value,
-            output: manager.core().snapshot_pty_plain(&id)?,
+            output: tool_output_full(message, manager.core().snapshot_pty_plain(&id)?, ""),
         });
     }
 
@@ -248,7 +260,6 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
 
     let mut value = json!({
         "asyncID": id,
-        "read_timeout": options.read_timeout.unwrap_or(INPUT_TIMEOUT),
         "wrote": data.len(),
         "source": source,
     });
@@ -261,12 +272,22 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
     )
     .await?;
     merge_json(&mut value, attach_meta);
+    let message = take_message(&mut value);
     add_raw_pretty(&manager, &id, &mut value, options.show_raw_pretty)?;
     Ok(ToolResult {
-        title: "Async input sent".to_string(),
         metadata: value.clone(),
-        output: snapshot,
+        output: tool_output_full(message, snapshot, ""),
     })
+}
+
+fn take_message(value: &mut serde_json::Value) -> String {
+    let Some(object) = value.as_object_mut() else {
+        return String::new();
+    };
+    object
+        .remove("message")
+        .and_then(|message| message.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn add_raw_pretty(

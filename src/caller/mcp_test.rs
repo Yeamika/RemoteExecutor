@@ -1,4 +1,4 @@
-use remote_executor::{handle_mcp_message, run_mcp_stdio_io_with_caller, Caller};
+use crate::{handle_mcp_message, run_mcp_stdio_io_with_caller, Caller};
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
@@ -38,14 +38,18 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(properties.get("callTimeoutMs").is_none());
     assert!(properties.get("hashCheckMode").is_some());
 
-    let apply_patch = tools
+    let file_action = tools
         .iter()
-        .find(|tool| tool["name"] == "apply_patch")
+        .find(|tool| tool["name"] == "FileAction")
         .unwrap();
-    let apply_properties = &apply_patch["inputSchema"]["properties"];
-    assert!(apply_properties.get("filePath").is_some());
-    assert!(apply_properties.get("patchMode").is_some());
-    assert!(apply_properties.get("hashCode").is_some());
+    let action_properties = &file_action["inputSchema"]["properties"];
+    assert!(action_properties.get("mode").is_some());
+    assert!(action_properties.get("filePath").is_some());
+    assert!(action_properties.get("newFilePath").is_some());
+    assert!(action_properties.get("content").is_some());
+    assert!(action_properties.get("patchMode").is_some());
+    assert!(action_properties.get("hashCode").is_some());
+    assert!(!tools.iter().any(|tool| tool["name"] == "apply_patch"));
     assert!(!tools.iter().any(|tool| tool["name"] == "diffy"));
 
     let list = tools
@@ -56,30 +60,24 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(list_properties.get("targetExecutor").is_none());
     assert!(list_properties.get("directory").is_none());
 
-    let stop = tools
-        .iter()
-        .find(|tool| tool["name"] == "exbash_stop")
-        .unwrap();
-    let stop_properties = &stop["inputSchema"]["properties"];
-    assert!(stop_properties.get("targetExecutor").is_some());
-    assert!(stop_properties.get("directory").is_none());
+    assert!(!tools.iter().any(|tool| tool["name"] == "exbash_shell"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "exbash_list"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "exbash_attach"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "exbash_stop"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "exbash_remove"));
 
     let exbash = tools.iter().find(|tool| tool["name"] == "exbash").unwrap();
     let exbash_properties = &exbash["inputSchema"]["properties"];
+    assert!(exbash_properties.get("mode").is_some());
     assert!(exbash_properties.get("read_timeout").is_some());
+    assert!(exbash_properties.get("shell").is_some());
+    assert!(exbash_properties.get("asyncID").is_some());
+    assert!(exbash_properties.get("text").is_some());
+    assert!(exbash_properties.get("showRawPretty").is_some());
     assert!(exbash_properties.get("async_timeout").is_none());
-    assert!(tools.iter().any(|tool| tool["name"] == "exbash_shell"));
-
-    let attach = tools
-        .iter()
-        .find(|tool| tool["name"] == "exbash_attach")
-        .unwrap();
-    let attach_properties = &attach["inputSchema"]["properties"];
-    assert!(attach_properties.get("read_timeout").is_some());
-    assert!(attach_properties.get("showRawPretty").is_some());
-    assert!(attach_properties.get("timeout").is_none());
-    assert!(attach_properties.get("targetExecutor").is_some());
-    assert!(attach_properties.get("directory").is_none());
+    assert!(exbash_properties.get("targetExecutor").is_some());
+    assert!(exbash_properties.get("directory").is_some());
+    assert!(tools.iter().any(|tool| tool["name"] == "set_default_shell"));
 }
 
 #[tokio::test]
@@ -140,8 +138,8 @@ async fn mcp_allows_concurrent_exbash_controls() {
 
     input_tx
         .write_all(
-            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"command":"echo second","read_timeout":1000}}}
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exbash","arguments":{"mode":"run","command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exbash","arguments":{"mode":"run","command":"echo second","read_timeout":1000}}}
 "#,
         )
         .await

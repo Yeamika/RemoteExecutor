@@ -1,4 +1,4 @@
-use crate::exec::ExbashOptions;
+use super::ExbashOptions;
 use crate::{ShellManager, ToolContext};
 use anyhow::{anyhow, Result};
 use pty_t_core::{CommandSpec, SessionDetail};
@@ -19,7 +19,6 @@ pub(crate) struct RunDetail {
     #[serde(rename = "asyncID")]
     pub(crate) async_id: String,
     pub(crate) pid: Option<u32>,
-    pub(crate) status: String,
     pub(crate) state: String,
     #[serde(rename = "exitCode", skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<Value>,
@@ -60,12 +59,17 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
         .clone()
         .ok_or_else(|| anyhow!("command is required"))?;
     let manager = manager(ctx)?;
-    let cwd = ctx.directory.clone();
+    let cwd = options
+        .workdir
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| ctx.resolve(path))
+        .unwrap_or_else(|| ctx.directory.clone());
     let id = next_id();
     let timeout_ms = options.timeout_ms()?;
     let session = manager.create_pty(
         id.clone(),
-        command_spec(&command, &cwd, options.shell)?,
+        command_spec(&command, &cwd, options, ctx)?,
         None,
         None,
     )?;
@@ -241,12 +245,18 @@ pub(crate) async fn attach(
 ) -> Result<(String, serde_json::Value)> {
     wait_attach_timeout(manager, async_id, timeout, controller).await?;
     let text = manager.core().snapshot_pty_plain(async_id)?;
-    let output_bytes = manager
-        .core()
-        .detail(async_id)?
-        .output_history_bytes
-        .saturating_sub(output_offset);
-    Ok((text, json!({ "outputBytes": output_bytes })))
+    let detail = manager.core().detail(async_id)?;
+    let output_bytes = detail.output_history_bytes.saturating_sub(output_offset);
+    let mut metadata = json!({ "outputBytes": output_bytes });
+    if let Some(exit_code) = detail.exit_code {
+        let exit_code_value =
+            exit_code_json(async_id, Some(exit_code)).unwrap_or_else(|| json!(exit_code));
+        let exit_code_display = exit_code_display(async_id, exit_code);
+        metadata["state"] = json!("stopped");
+        metadata["exitCode"] = exit_code_value;
+        metadata["message"] = json!(format!("task exited with code {exit_code_display}"));
+    }
+    Ok((text, metadata))
 }
 
 async fn wait_attach_timeout(
@@ -269,6 +279,9 @@ async fn wait_attach_timeout(
             }
         }
 
+        if manager.core().detail(async_id)?.exit_code.is_some() {
+            return Ok(());
+        }
         let now = time::Instant::now();
         if now >= deadline {
             return Ok(());
@@ -347,15 +360,10 @@ fn run_detail_from_session(
         "running"
     }
     .to_string();
-    let status = exit_code
-        .as_ref()
-        .map(|code| format!("stopped (exit {})", exit_code_value_text(code)))
-        .unwrap_or_else(|| "running".to_string());
     let ended_at = exit_code.as_ref().map(|_| now_ms());
     RunDetail {
         async_id: detail.pty,
         pid: detail.process_id,
-        status,
         state,
         exit_code,
         total_output: detail.output_history_bytes,
@@ -411,9 +419,14 @@ fn spawn_timeout(manager: ShellManager, async_id: String, timeout: u64) {
     });
 }
 
-fn command_spec(command: &str, cwd: &std::path::Path, shell: bool) -> Result<CommandSpec> {
-    if shell {
-        return Ok(shell_command_spec(command, cwd));
+fn command_spec(
+    command: &str,
+    cwd: &std::path::Path,
+    options: &ExbashOptions,
+    ctx: &ToolContext,
+) -> Result<CommandSpec> {
+    if options.shell {
+        return shell_command_spec(command, cwd, options, ctx);
     }
 
     let parts = shell_words::split(command)
@@ -426,7 +439,19 @@ fn command_spec(command: &str, cwd: &std::path::Path, shell: bool) -> Result<Com
         .cwd(cwd.to_path_buf()))
 }
 
-fn shell_command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
+fn shell_command_spec(
+    command: &str,
+    cwd: &std::path::Path,
+    options: &ExbashOptions,
+    ctx: &ToolContext,
+) -> Result<CommandSpec> {
+    if let Some(settings) = ctx.settings_store() {
+        return settings.command_spec(options.shell_profile.as_deref(), command, cwd);
+    }
+    Ok(platform_shell_command_spec(command, cwd))
+}
+
+fn platform_shell_command_spec(command: &str, cwd: &std::path::Path) -> CommandSpec {
     if cfg!(windows) {
         CommandSpec::new("powershell.exe")
             .args([

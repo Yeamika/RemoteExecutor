@@ -1,32 +1,38 @@
 mod caller;
-mod exec;
-mod exec_support;
+mod context;
 mod executor;
-mod fs_ops;
-mod patch;
-mod rg;
+mod protocol;
+mod settings;
 mod shell_manager;
-mod tool;
+mod tools;
 mod websocket;
 
 pub use caller::{
     handle_mcp_message, handle_request, run_mcp_stdio, run_mcp_stdio_io_with_caller,
-    run_mcp_stdio_with_caller, run_stdio, run_stdio_io_with_caller, run_stdio_with_caller, Caller,
+    run_mcp_stdio_with_caller, run_mcp_stdio_with_settings_path, run_stdio,
+    run_stdio_io_with_caller, run_stdio_with_caller, run_stdio_with_settings_path, Caller,
     ConnectExecutorOptions, SetDefaultExecutorOptions, StdioRequest, StdioResponse,
 };
-pub use exec::{exbash, exbash_shell, ExbashOptions, ExbashOutput};
-pub use executor::{
-    dispatch_tool, start_shared_executor_ws, Executor, ExecutorInfo, ExecutorRequest,
-    ExecutorResponse,
+pub use context::ToolContext;
+pub use executor::{dispatch_tool, start_shared_executor_ws, Executor};
+pub use protocol::{
+    tool_output, tool_output_full, tool_output_with_info, ExecutorInfo, ExecutorRequest,
+    ExecutorResponse, ToolResult,
 };
-pub use fs_ops::{
-    file_hash_code, file_stamp, glob_paths, grep_paths, read_path, stat_path, FileKind, FileStamp,
-    GlobOptions, GrepOptions, ReadMode, ReadOptions, StatOptions,
+pub use settings::{
+    set_default_shell, ReSettings, SetDefaultShellOptions, SettingsStore, ShellProfile,
+    ShellResolution, ShellSettings,
 };
-pub use patch::{apply_patch, ApplyOptions, PatchFile, PatchMode};
-pub use rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 pub use shell_manager::ShellManager;
-pub use tool::{ToolContext, ToolResult};
+pub use tools::exbash::{exbash, ExbashOptions, ExbashOutput};
+pub use tools::file_action::{
+    file_action, FileActionMode, FileActionOptions, PatchFile, PatchMode,
+};
+pub use tools::fs::{
+    file_hash_code, file_stamp, glob_paths, hash_bytes, read_path, stat_path, FileKind, FileStamp,
+    GlobOptions, ReadMode, ReadOptions, StatOptions,
+};
+pub use tools::rg::{rg_matches, rg_search, RgExecutor, RgMatch, RgOptions, RgOutput};
 
 use anyhow::Result;
 use std::path::PathBuf;

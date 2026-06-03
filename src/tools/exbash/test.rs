@@ -1,4 +1,4 @@
-use remote_executor::{Executor, ExecutorRequest, ShellManager};
+use crate::{Executor, ExecutorRequest, SettingsStore, ShellManager};
 use serde_json::json;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -7,16 +7,16 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn executor_applies_tool_timeout_to_small_tools() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("file.txt"), "needle\n").unwrap();
+    fs::write(dir.path().join("file.txt"), "content\n".repeat(500_000)).unwrap();
 
     let response = Executor::local("timeout")
         .handle(ExecutorRequest {
             id: json!(1),
-            method: "grep".to_string(),
-            params: json!({"pattern":"needle"}),
+            method: "rg".to_string(),
+            params: json!({"pattern":"needle", "root":dir.path().to_string_lossy()}),
             directory: Some(dir.path().to_path_buf()),
             executor: None,
-            tool_timeout_ms: Some(0),
+            tool_timeout_ms: Some(1),
         })
         .await;
 
@@ -30,7 +30,7 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
         .handle(ExecutorRequest {
             id: json!(2),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo hi",
                 "description":"timeout smoke",
                 "read_timeout":2000
@@ -46,7 +46,7 @@ async fn executor_does_not_apply_tool_timeout_to_exbash() {
 }
 
 #[tokio::test]
-async fn exbash_shell_wraps_command_with_platform_shell() {
+async fn exbash_mode_shell_wraps_command_with_platform_shell() {
     let command = if cfg!(windows) {
         "Write-Output shell-ok"
     } else {
@@ -55,8 +55,8 @@ async fn exbash_shell_wraps_command_with_platform_shell() {
     let response = Executor::local("shell")
         .handle(ExecutorRequest {
             id: json!(35),
-            method: "exbash_shell".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell",
                 "command":command,
                 "read_timeout":2000
             }),
@@ -72,12 +72,118 @@ async fn exbash_shell_wraps_command_with_platform_shell() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn exbash_mode_shell_uses_hot_reloaded_default_shell() {
+    let dir = tempdir().unwrap();
+    let settings_path = dir.path().join(".re-setting.json");
+    fs::write(&settings_path, shell_settings("one")).unwrap();
+
+    let settings = SettingsStore::load(Some(settings_path.clone())).unwrap();
+    let executor = Executor::local("shell-settings").with_settings_store(settings);
+
+    let first = executor
+        .handle(ExecutorRequest {
+            id: json!("first-shell"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell","command":"echo run", "read_timeout":2000}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(first.ok, "{:?}", first.error);
+    assert!(first.result.unwrap().to_string().contains("one-marker"));
+
+    std::thread::sleep(Duration::from_millis(10));
+    fs::write(&settings_path, shell_settings("two")).unwrap();
+
+    let second = executor
+        .handle(ExecutorRequest {
+            id: json!("second-shell"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell","command":"echo run", "read_timeout":2000}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(second.ok, "{:?}", second.error);
+    assert!(second
+        .result
+        .unwrap()
+        .to_string()
+        .contains("two-marker-extra"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn set_default_shell_saves_settings_and_updates_default() {
+    let dir = tempdir().unwrap();
+    let settings_path = dir.path().join(".re-setting.json");
+    fs::write(&settings_path, shell_settings("one")).unwrap();
+
+    let settings = SettingsStore::load(Some(settings_path.clone())).unwrap();
+    let executor = Executor::local("set-default-shell").with_settings_store(settings);
+    let set = executor
+        .handle(ExecutorRequest {
+            id: json!("set-shell"),
+            method: "set_default_shell".to_string(),
+            params: json!({"shell":"two"}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(set.ok, "{:?}", set.error);
+    assert!(fs::read_to_string(&settings_path)
+        .unwrap()
+        .contains("\"default\": \"two\""));
+
+    let run = executor
+        .handle(ExecutorRequest {
+            id: json!("run-shell"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell","command":"echo run", "read_timeout":2000}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(run.ok, "{:?}", run.error);
+    assert!(run.result.unwrap().to_string().contains("two-marker-extra"));
+}
+
+#[cfg(unix)]
+fn shell_settings(default_shell: &str) -> String {
+    json!({
+        "version": 1,
+        "shells": {
+            "default": default_shell,
+            "interactive": "one",
+            "profiles": {
+                "one": {
+                    "candidates": ["sh"],
+                    "commandArgs": ["-c", "echo one-marker; {command}"],
+                    "interactiveArgs": []
+                },
+                "two": {
+                    "candidates": ["sh"],
+                    "commandArgs": ["-c", "echo two-marker-extra; {command}"],
+                    "interactiveArgs": []
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn exbash_direct_does_not_use_shell_syntax() {
     let response = Executor::local("direct")
         .handle(ExecutorRequest {
             id: json!(36),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo direct-a; echo direct-b",
                 "read_timeout":2000
             }),
@@ -106,7 +212,7 @@ async fn exbash_detach_returns_current_snapshot() {
         .handle(ExecutorRequest {
             id: json!(21),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "description":"detach snapshot",
                 "read_timeout":200
@@ -121,14 +227,21 @@ async fn exbash_detach_returns_current_snapshot() {
     let result = start.result.unwrap();
     let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
     assert_eq!(result["metadata"]["detached"], json!(true));
-    assert!(result["output"].as_str().unwrap().contains("before-detach"));
+    assert!(result["output"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("before-detach"));
     assert!(result["metadata"].get("output").is_none());
+    assert_eq!(
+        result["output"]["message"],
+        json!(format!("{async_id} detached"))
+    );
 
     let _ = executor
         .handle(ExecutorRequest {
             id: json!(22),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -137,8 +250,8 @@ async fn exbash_detach_returns_current_snapshot() {
     let _ = executor
         .handle(ExecutorRequest {
             id: json!(23),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -147,7 +260,94 @@ async fn exbash_detach_returns_current_snapshot() {
 }
 
 #[tokio::test]
-async fn exbash_remove_stops_running_process_before_removal() {
+async fn exbash_mode_run_uses_workdir_param() {
+    let dir = tempdir().unwrap();
+    let subdir = dir.path().join("subdir");
+    fs::create_dir(&subdir).unwrap();
+    let executor = Executor::local("run-workdir");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command '(Get-Location).Path'"
+    } else {
+        "pwd"
+    };
+
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!(124),
+            method: "exbash".to_string(),
+            params: json!({"mode":"run", "command": command, "workdir":"subdir", "read_timeout":1000}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    assert_eq!(result["metadata"]["exitCode"], json!(0));
+    assert!(result["output"]["text"]
+        .as_str()
+        .unwrap()
+        .contains(subdir.to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn exbash_detach_keeps_text_written_before_sleep() {
+    let executor = Executor::local("detach-written-text");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Write-Output detached-text; Start-Sleep -Seconds 5'"
+    } else {
+        "bash -lc 'printf detached-text; sleep 5'"
+    };
+
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!(121),
+            method: "exbash".to_string(),
+            params: json!({"mode":"run", "command": command, "read_timeout":200}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let result = start.result.unwrap();
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
+    assert_eq!(result["metadata"]["detached"], json!(true));
+    assert!(result["output"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("detached-text"));
+    assert_eq!(
+        result["output"]["message"],
+        json!(format!("{async_id} detached"))
+    );
+
+    let _ = executor
+        .handle(ExecutorRequest {
+            id: json!(122),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    let _ = executor
+        .handle(ExecutorRequest {
+            id: json!(123),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn exbash_mode_remove_stops_running_process_before_removal() {
     let executor = Executor::local("remove-running");
     let command = if cfg!(windows) {
         "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
@@ -158,7 +358,7 @@ async fn exbash_remove_stops_running_process_before_removal() {
         .handle(ExecutorRequest {
             id: json!(24),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "read_timeout":0
             }),
@@ -177,8 +377,8 @@ async fn exbash_remove_stops_running_process_before_removal() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(25),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -186,15 +386,14 @@ async fn exbash_remove_stops_running_process_before_removal() {
         .await;
     assert!(remove.ok, "{:?}", remove.error);
     let result = remove.result.unwrap();
-    assert_eq!(result["metadata"]["removed"], json!(true));
-    assert_eq!(result["metadata"]["stopped"], json!(true));
-    assert_eq!(result["output"], json!(""));
+    assert_eq!(result["metadata"]["ok"], json!(true));
+    assert_eq!(result["output"]["text"], json!("ok"));
 
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(26),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id,
                 "read_timeout":0
             }),
@@ -219,7 +418,7 @@ async fn exbash_total_timeout_sets_exit_code_to_timeout() {
         .handle(ExecutorRequest {
             id: json!(37),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "timeout":100,
                 "read_timeout":2000
@@ -238,7 +437,7 @@ async fn exbash_total_timeout_sets_exit_code_to_timeout() {
 }
 
 #[tokio::test]
-async fn exbash_stop_sets_exit_code_to_stopped() {
+async fn exbash_mode_stop_sets_exit_code_to_stopped() {
     let executor = Executor::local("stop-reason");
     let command = if cfg!(windows) {
         "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
@@ -250,7 +449,7 @@ async fn exbash_stop_sets_exit_code_to_stopped() {
         .handle(ExecutorRequest {
             id: json!(38),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "read_timeout":0
             }),
@@ -268,8 +467,8 @@ async fn exbash_stop_sets_exit_code_to_stopped() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(39),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -284,8 +483,8 @@ async fn exbash_stop_sets_exit_code_to_stopped() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(40),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -300,7 +499,7 @@ async fn exbash_rejects_old_async_timeout_name() {
         .handle(ExecutorRequest {
             id: json!(7),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo hi",
                 "async_timeout":0
             }),
@@ -323,7 +522,7 @@ async fn exbash_rejects_oversized_inputs() {
         .handle(ExecutorRequest {
             id: json!(27),
             method: "exbash".to_string(),
-            params: json!({"command":command}),
+            params: json!({"mode":"run","command":command}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -337,7 +536,7 @@ async fn exbash_rejects_oversized_inputs() {
         .handle(ExecutorRequest {
             id: json!(28),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo hi",
                 "description":description
             }),
@@ -353,8 +552,8 @@ async fn exbash_rejects_oversized_inputs() {
     let response = executor
         .handle(ExecutorRequest {
             id: json!(29),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID":async_id,
                 "read_timeout":0
             }),
@@ -370,8 +569,8 @@ async fn exbash_rejects_oversized_inputs() {
     let response = executor
         .handle(ExecutorRequest {
             id: json!(30),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID":"rex-short",
                 "text":text,
                 "read_timeout":0
@@ -388,8 +587,8 @@ async fn exbash_rejects_oversized_inputs() {
     let response = executor
         .handle(ExecutorRequest {
             id: json!(31),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID":"rex-short",
                 "filePath":file_path,
                 "read_timeout":0
@@ -404,7 +603,7 @@ async fn exbash_rejects_oversized_inputs() {
 }
 
 #[tokio::test]
-async fn exbash_attach_rejects_oversized_file_input() {
+async fn exbash_mode_attach_rejects_oversized_file_input() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("payload.txt"), vec![b'x'; 4097]).unwrap();
 
@@ -418,7 +617,7 @@ async fn exbash_attach_rejects_oversized_file_input() {
         .handle(ExecutorRequest {
             id: json!(32),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "read_timeout":0
             }),
@@ -436,8 +635,8 @@ async fn exbash_attach_rejects_oversized_file_input() {
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(33),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID":async_id.clone(),
                 "filePath":"payload.txt",
                 "read_timeout":0
@@ -453,8 +652,8 @@ async fn exbash_attach_rejects_oversized_file_input() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(34),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -475,7 +674,7 @@ async fn exbash_total_timeout_accepts_minus_one() {
         .handle(ExecutorRequest {
             id: json!(9),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "timeout": -1,
                 "read_timeout": 0
@@ -494,8 +693,8 @@ async fn exbash_total_timeout_accepts_minus_one() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(10),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -506,8 +705,8 @@ async fn exbash_total_timeout_accepts_minus_one() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(11),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -528,7 +727,7 @@ async fn exbash_total_timeout_accepts_zero_as_unlimited() {
         .handle(ExecutorRequest {
             id: json!(18),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "timeout": 0,
                 "read_timeout": 0
@@ -547,8 +746,8 @@ async fn exbash_total_timeout_accepts_zero_as_unlimited() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(19),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -559,8 +758,8 @@ async fn exbash_total_timeout_accepts_zero_as_unlimited() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(20),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -575,7 +774,7 @@ async fn exbash_rejects_other_negative_total_timeouts() {
         .handle(ExecutorRequest {
             id: json!(12),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"echo hi",
                 "timeout":-2,
                 "read_timeout":0
@@ -591,7 +790,7 @@ async fn exbash_rejects_other_negative_total_timeouts() {
 }
 
 #[tokio::test]
-async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
+async fn exbash_mode_attach_waits_read_timeout_and_returns_snapshot() {
     let executor = Executor::local("attach-snapshot");
     let command = if cfg!(windows) {
         "powershell.exe -NoLogo -NoProfile -NonInteractive -Command '$line=[Console]::In.ReadLine(); Write-Output $line; Start-Sleep -Seconds 5'"
@@ -602,7 +801,7 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         .handle(ExecutorRequest {
             id: json!(3),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "description":"snapshot attach",
                 "read_timeout":0
@@ -614,7 +813,7 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
         .await;
     assert!(start.ok, "{:?}", start.error);
     let start_result = start.result.unwrap();
-    assert_eq!(start_result["metadata"]["read_timeout"], json!(0));
+    assert!(start_result["metadata"].get("read_timeout").is_none());
     let async_id = start_result["metadata"]["asyncID"]
         .as_str()
         .unwrap()
@@ -623,8 +822,8 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let old_timeout = executor
         .handle(ExecutorRequest {
             id: json!(4),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "timeout":100
             }),
@@ -640,8 +839,8 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(8),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "text":"hello snapshot\n",
                 "read_timeout":100
@@ -655,20 +854,23 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     assert!(started.elapsed().as_millis() >= 90);
 
     let result = attached.result.unwrap();
-    assert_eq!(result["metadata"]["read_timeout"], json!(100));
+    assert!(result["metadata"].get("read_timeout").is_none());
     assert!(result["metadata"]["outputBytes"].as_u64().unwrap() > 0);
-    assert!(result["output"]
+    assert!(result["output"]["text"]
         .as_str()
         .unwrap()
         .contains("hello snapshot"));
-    assert!(!result["output"].as_str().unwrap().contains("\u{1b}"));
+    assert!(!result["output"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\u{1b}"));
     assert!(result["metadata"].get("rawPretty").is_none());
 
     let raw_pretty = executor
         .handle(ExecutorRequest {
             id: json!(17),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "read_timeout":0,
                 "showRawPretty":true
@@ -684,15 +886,15 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(5),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
         })
         .await;
     assert!(stop.ok, "{:?}", stop.error);
-    assert!(stop.result.unwrap()["output"]
+    assert!(stop.result.unwrap()["output"]["text"]
         .as_str()
         .unwrap()
         .contains("hello snapshot"));
@@ -700,27 +902,77 @@ async fn exbash_attach_waits_read_timeout_and_returns_snapshot() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(6),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
         })
         .await;
     assert!(remove.ok, "{:?}", remove.error);
-    assert_eq!(remove.result.unwrap()["output"], json!(""));
+    assert_eq!(remove.result.unwrap()["output"]["text"], json!("ok"));
+}
+
+#[tokio::test]
+async fn exbash_mode_attach_returns_stopped_metadata_when_process_exits_during_wait() {
+    let executor = Executor::local("attach-exits-during-wait");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Milliseconds 50; Write-Output done'"
+    } else {
+        "bash -lc 'sleep 0.05; echo done'"
+    };
+
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!("start-exit-during-attach"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"run", "command":command, "read_timeout":0}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(start.ok, "{:?}", start.error);
+    let async_id = start.result.unwrap()["metadata"]["asyncID"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = Instant::now();
+    let attached = executor
+        .handle(ExecutorRequest {
+            id: json!("attach-exit-during-wait"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach", "asyncID":async_id, "read_timeout":1000}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(attached.ok, "{:?}", attached.error);
+    assert!(started.elapsed() < Duration::from_millis(900));
+
+    let result = attached.result.unwrap();
+    assert_eq!(result["metadata"]["state"], json!("stopped"));
+    assert_eq!(result["metadata"]["exitCode"], json!(0));
+    assert!(result["output"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("task exited with code 0"));
+    assert!(result["metadata"].get("message").is_none());
+    assert!(result["output"]["text"].as_str().unwrap().contains("done"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
+async fn exbash_mode_attach_errors_with_controller_id_when_control_is_stolen() {
     let manager = ShellManager::default_shell(80, 24);
     let executor = Executor::local("control").with_shell_manager(manager.clone());
     let start = executor
         .handle(ExecutorRequest {
             id: json!(21),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command":"bash -lc 'read line; echo $line; sleep 5'",
                 "read_timeout":0
             }),
@@ -749,8 +1001,8 @@ async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(22),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "text":"hello stolen\n",
                 "read_timeout":500
@@ -770,8 +1022,8 @@ async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
     let stop = executor
         .handle(ExecutorRequest {
             id: json!(23),
-            method: "exbash_stop".to_string(),
-            params: json!({"asyncID":async_id.clone()}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"stop","asyncID":async_id.clone()}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -782,8 +1034,8 @@ async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(24),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,
@@ -793,7 +1045,7 @@ async fn exbash_attach_errors_with_controller_id_when_control_is_stolen() {
 }
 
 #[tokio::test]
-async fn exbash_attach_returns_snapshot_for_stopped_run() {
+async fn exbash_mode_attach_returns_snapshot_for_stopped_run() {
     let executor = Executor::local("stopped-attach");
     let command = if cfg!(windows) {
         "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Milliseconds 100; Write-Output stopped-output'"
@@ -804,7 +1056,7 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
         .handle(ExecutorRequest {
             id: json!(13),
             method: "exbash".to_string(),
-            params: json!({
+            params: json!({"mode":"run",
                 "command": command,
                 "read_timeout": 0
             }),
@@ -824,8 +1076,8 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
     let attached = executor
         .handle(ExecutorRequest {
             id: json!(14),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "read_timeout": 1000
             }),
@@ -837,13 +1089,13 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
     assert!(attached.ok, "{:?}", attached.error);
     let result = attached.result.unwrap();
     assert_eq!(result["metadata"]["state"], json!("stopped"));
-    assert_eq!(result["metadata"]["inputFailed"], json!(false));
     assert_eq!(result["metadata"]["wrote"], json!(0));
-    assert!(result["metadata"]["message"]
+    assert!(result["output"]["message"]
         .as_str()
         .unwrap()
         .contains("task already exited"));
-    assert!(result["output"]
+    assert!(result["metadata"].get("message").is_none());
+    assert!(result["output"]["text"]
         .as_str()
         .unwrap()
         .contains("stopped-output"));
@@ -851,8 +1103,8 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
     let input_after_stop = executor
         .handle(ExecutorRequest {
             id: json!(15),
-            method: "exbash_attach".to_string(),
-            params: json!({
+            method: "exbash".to_string(),
+            params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "text":"ignored\n",
                 "read_timeout": 0
@@ -864,14 +1116,14 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
         .await;
     assert!(input_after_stop.ok, "{:?}", input_after_stop.error);
     let result = input_after_stop.result.unwrap();
-    assert_eq!(result["metadata"]["inputFailed"], json!(true));
     assert_eq!(result["metadata"]["source"], json!("text"));
     assert_eq!(result["metadata"]["wrote"], json!(0));
-    assert!(result["metadata"]["message"]
+    assert!(result["output"]["message"]
         .as_str()
         .unwrap()
         .starts_with("input failed: task already exited"));
-    assert!(result["output"]
+    assert!(result["metadata"].get("message").is_none());
+    assert!(result["output"]["text"]
         .as_str()
         .unwrap()
         .contains("stopped-output"));
@@ -879,8 +1131,8 @@ async fn exbash_attach_returns_snapshot_for_stopped_run() {
     let remove = executor
         .handle(ExecutorRequest {
             id: json!(16),
-            method: "exbash_remove".to_string(),
-            params: json!({"asyncID":async_id}),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,
             executor: None,
             tool_timeout_ms: None,

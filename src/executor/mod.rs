@@ -1,15 +1,19 @@
+mod dispatch;
+#[cfg(test)]
+mod test;
+mod ws;
+
 use crate::{
-    apply_patch, exbash, exbash_shell, glob_paths, grep_paths, read_path, rg_search, stat_path,
-    ApplyOptions, ExbashOptions, GlobOptions, GrepOptions, ReadOptions, RgOptions, ShellManager,
+    exbash, file_action, glob_paths, read_path, rg_search, set_default_shell, stat_path,
+    tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest, ExecutorResponse, FileActionOptions,
+    GlobOptions, ReadOptions, RgOptions, SetDefaultShellOptions, SettingsStore, ShellManager,
     StatOptions, ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::accept_async;
@@ -18,74 +22,11 @@ use tokio_tungstenite::tungstenite::Message;
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 5_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExecutorInfo {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    #[serde(default)]
-    pub labels: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExecutorRequest {
-    pub id: Value,
-    #[serde(rename = "tool")]
-    pub method: String,
-    #[serde(default)]
-    pub params: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directory: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executor: Option<String>,
-    #[serde(
-        default,
-        rename = "toolTimeoutMs",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub tool_timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExecutorResponse {
-    pub id: Value,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub executor: Option<String>,
-}
-
-impl ExecutorResponse {
-    pub fn ok(id: Value, executor: Option<String>, result: Value) -> Self {
-        Self {
-            id,
-            ok: true,
-            result: Some(result),
-            error: None,
-            executor,
-        }
-    }
-
-    pub fn err(id: Value, executor: Option<String>, error: impl Into<String>) -> Self {
-        Self {
-            id,
-            ok: false,
-            result: None,
-            error: Some(error.into()),
-            executor,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Executor {
     info: ExecutorInfo,
     shell_manager: Option<ShellManager>,
+    settings_store: SettingsStore,
 }
 
 impl Executor {
@@ -93,9 +34,9 @@ impl Executor {
         Self {
             info,
             shell_manager: None,
+            settings_store: SettingsStore::load_default_lossy(),
         }
     }
-
     pub fn local(id: impl Into<String>) -> Self {
         Self::new(ExecutorInfo {
             id: id.into(),
@@ -115,11 +56,16 @@ impl Executor {
         self
     }
 
+    pub fn with_settings_store(mut self, settings_store: SettingsStore) -> Self {
+        self.settings_store = settings_store;
+        self
+    }
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
         let method = request.method.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
-        let mut ctx = ToolContext::new(request.directory);
+        let mut ctx =
+            ToolContext::new(request.directory).with_settings_store(self.settings_store.clone());
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }
@@ -241,52 +187,27 @@ fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
 }
 
 fn is_exbash_method(method: &str) -> bool {
-    matches!(
-        method,
-        "exbash"
-            | "exbash_shell"
-            | "exbash_list"
-            | "exbash_attach"
-            | "exbash_stop"
-            | "exbash_remove"
-    )
+    method == "exbash"
 }
 
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {
     match method {
         "exbash" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
-        "exbash_shell" => exbash_shell(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
-        "exbash_list" => {
-            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
-            options.mode = Some("list".to_string());
-            exbash(options, ctx).await
-        }
-        "exbash_attach" => {
-            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
-            options.mode = Some("attach".to_string());
-            exbash(options, ctx).await
-        }
-        "exbash_stop" => {
-            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
-            options.mode = Some("exbash_stop".to_string());
-            exbash(options, ctx).await
-        }
-        "exbash_remove" => {
-            let mut options = serde_json::from_value::<ExbashOptions>(params)?;
-            options.mode = Some("exbash_remove".to_string());
-            exbash(options, ctx).await
-        }
-        "glob" => glob_paths(serde_json::from_value::<GlobOptions>(params)?, ctx),
-        "grep" => grep_paths(serde_json::from_value::<GrepOptions>(params)?, ctx).await,
         "read" => read_path(serde_json::from_value::<ReadOptions>(params)?, ctx),
         "stat" => stat_path(serde_json::from_value::<StatOptions>(params)?, ctx),
-        "apply_patch" => apply_patch(serde_json::from_value::<ApplyOptions>(params)?, ctx).await,
+        "FileAction" => {
+            file_action(serde_json::from_value::<FileActionOptions>(params)?, ctx).await
+        }
+        "glob" => glob_paths(serde_json::from_value::<GlobOptions>(params)?, ctx),
+        "set_default_shell" => set_default_shell(
+            serde_json::from_value::<SetDefaultShellOptions>(params)?,
+            ctx,
+        ),
         "rg" => {
             let output = rg_search(serde_json::from_value::<RgOptions>(params)?).await?;
             Ok(ToolResult {
-                title: "rg".to_string(),
                 metadata: serde_json::json!({ "matches": output.matches, "code": output.code }),
-                output: output.stdout,
+                output: tool_output(output.stdout),
             })
         }
         _ => Err(anyhow::anyhow!("unknown method: {method}")),

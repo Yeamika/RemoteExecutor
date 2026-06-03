@@ -1,19 +1,11 @@
-use crate::shell_manager::ShellManager;
-use serde::Serialize;
-use serde_json::Value;
+use crate::{settings::SettingsStore, shell_manager::ShellManager};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 pub struct ToolContext {
     pub directory: PathBuf,
     shell_manager: Option<ShellManager>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ToolResult {
-    pub title: String,
-    pub metadata: Value,
-    pub output: String,
+    settings_store: Option<SettingsStore>,
 }
 
 impl ToolContext {
@@ -24,12 +16,22 @@ impl ToolContext {
         Self {
             directory,
             shell_manager: None,
+            settings_store: None,
         }
     }
 
     pub fn with_shell_manager(mut self, shell_manager: ShellManager) -> Self {
         self.shell_manager = Some(shell_manager);
         self
+    }
+
+    pub fn with_settings_store(mut self, settings_store: SettingsStore) -> Self {
+        self.settings_store = Some(settings_store);
+        self
+    }
+
+    pub fn settings_store(&self) -> Option<SettingsStore> {
+        self.settings_store.clone()
     }
 
     pub fn shell_manager(&self) -> Option<ShellManager> {

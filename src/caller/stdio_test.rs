@@ -1,4 +1,4 @@
-use remote_executor::{handle_request, run_stdio_io_with_caller, Caller, Executor, StdioRequest};
+use crate::{handle_request, run_stdio_io_with_caller, Caller, Executor, StdioRequest};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,16 +21,17 @@ async fn stdio_dispatches_glob() {
 }
 
 #[tokio::test]
-async fn stdio_dispatches_apply_patch() {
+async fn stdio_dispatches_file_action_patch() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "before\n").unwrap();
 
     let request = StdioRequest {
         id: json!(2),
-        method: "apply_patch".to_string(),
+        method: "FileAction".to_string(),
         params: json!({
+            "mode":"patch",
             "filePath":"file.txt",
-            "patchText":"replace 1 1\n+after"
+            "patchText":"@@ -1 +1 @@\n-before\n+after\n"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,
@@ -46,7 +47,32 @@ async fn stdio_dispatches_apply_patch() {
 }
 
 #[tokio::test]
-async fn executor_apply_patch_result_omits_full_file_contents() {
+async fn stdio_rejects_old_apply_patch_tool_name() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "before\n").unwrap();
+
+    let response = handle_request(StdioRequest {
+        id: json!("old-patch"),
+        method: "apply_patch".to_string(),
+        params: json!({
+            "filePath":"file.txt",
+            "patchText":"@@ -1 +1 @@\n-before\n+after\n"
+        }),
+        directory: Some(dir.path().to_path_buf()),
+        executor: None,
+        tool_timeout_ms: None,
+    })
+    .await;
+
+    assert!(!response.ok);
+    assert!(response
+        .error
+        .unwrap()
+        .contains("unknown method: apply_patch"));
+}
+
+#[tokio::test]
+async fn executor_file_action_result_omits_full_file_contents() {
     let dir = tempdir().unwrap();
     let secret = "secret-line-that-should-not-be-returned-by-re";
     let path = dir.path().join("file.txt");
@@ -55,10 +81,11 @@ async fn executor_apply_patch_result_omits_full_file_contents() {
     let response = Executor::local("patch-result")
         .handle(StdioRequest {
             id: json!("re"),
-            method: "apply_patch".to_string(),
+            method: "FileAction".to_string(),
             params: json!({
+                "mode":"patch",
                 "filePath":"file.txt",
-                "patchText":"replace 1 1\n+ONE"
+                "patchText":"@@ -1 +1 @@\n-one\n+ONE\n"
             }),
             directory: Some(dir.path().to_path_buf()),
             executor: None,
@@ -71,7 +98,7 @@ async fn executor_apply_patch_result_omits_full_file_contents() {
 }
 
 #[tokio::test]
-async fn caller_apply_patch_result_omits_full_file_contents() {
+async fn caller_file_action_result_omits_full_file_contents() {
     let dir = tempdir().unwrap();
     let secret = "secret-line-that-should-not-be-returned-by-rec";
     let path = dir.path().join("file.txt");
@@ -79,10 +106,11 @@ async fn caller_apply_patch_result_omits_full_file_contents() {
 
     let response = handle_request(StdioRequest {
         id: json!("rec"),
-        method: "apply_patch".to_string(),
+        method: "FileAction".to_string(),
         params: json!({
+            "mode":"patch",
             "filePath":"file.txt",
-            "patchText":"replace 1 1\n+ONE"
+            "patchText":"@@ -1 +1 @@\n-one\n+ONE\n"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,
@@ -128,8 +156,8 @@ async fn stdio_allows_concurrent_exbash_controls() {
 
     input_tx
         .write_all(
-            br#"{"id":1,"tool":"exbash","params":{"command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}
-{"id":2,"tool":"exbash","params":{"command":"echo second","read_timeout":1000}}
+            br#"{"id":1,"tool":"exbash","params":{"mode":"run","command":"bash -lc 'sleep 0.2; echo first'","read_timeout":1000}}
+{"id":2,"tool":"exbash","params":{"mode":"run","command":"echo second","read_timeout":1000}}
 "#,
         )
         .await
@@ -212,11 +240,11 @@ async fn stdio_keeps_requests_in_their_own_directories() {
     let second_response = responses.get("second").unwrap();
     assert_eq!(first_response["ok"], true);
     assert_eq!(second_response["ok"], true);
-    assert!(first_response["result"]["output"]
+    assert!(first_response["result"]["output"]["text"]
         .as_str()
         .unwrap()
         .contains("from first workspace"));
-    assert!(second_response["result"]["output"]
+    assert!(second_response["result"]["output"]["text"]
         .as_str()
         .unwrap()
         .contains("from second workspace"));

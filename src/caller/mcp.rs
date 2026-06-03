@@ -11,7 +11,11 @@ use tokio::task::JoinSet;
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 pub async fn run_mcp_stdio() -> Result<()> {
-    let caller = Caller::new().await?;
+    run_mcp_stdio_with_settings_path(None).await
+}
+
+pub async fn run_mcp_stdio_with_settings_path(settings_path: Option<PathBuf>) -> Result<()> {
+    let caller = Caller::new_with_settings(settings_path).await?;
     run_mcp_stdio_with_caller(caller).await
 }
 
@@ -165,9 +169,10 @@ fn response_to_tool_result(response: ExecutorResponse) -> Value {
     }
 
     let result = response.result.unwrap_or(Value::Null);
-    let text = result
-        .get("output")
-        .and_then(Value::as_str)
+    let output = result.get("output").unwrap_or(&Value::Null);
+    let text = output
+        .as_str()
+        .or_else(|| output.get("text").and_then(Value::as_str))
         .map(str::to_string)
         .unwrap_or_else(|| {
             serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
@@ -230,20 +235,6 @@ fn tools() -> Vec<Value> {
             true,
         ),
         executor_tool(
-            "exbash_shell",
-            "Run a command through the platform shell; command input must be at most 4KB; detaches if it exceeds read_timeout",
-            schema(
-                &["command"],
-                &[
-                    prop_desc("command", "string", "Command input must be at most 4KB"),
-                    prop("description", "string"),
-                    prop("timeout", "number"),
-                    prop("read_timeout", "number"),
-                ],
-            ),
-            true,
-        ),
-        executor_tool(
             "glob",
             "Find files by glob pattern",
             schema(
@@ -259,26 +250,16 @@ fn tools() -> Vec<Value> {
             true,
         ),
         executor_tool(
-            "grep",
-            "Search file contents",
+            "FileAction",
+            "Create, delete, rename, or patch a single file",
             schema(
-                &["pattern"],
+                &["mode", "filePath"],
                 &[
-                    prop("pattern", "string"),
-                    prop("path", "string"),
-                    prop("include", "string"),
-                ],
-            ),
-            true,
-        ),
-        executor_tool(
-            "apply_patch",
-            "Apply a single-file patch using replace/delete/insert; patchMode is text by default or binary for byte-offset hex patches",
-            schema(
-                &["filePath", "patchText"],
-                &[
+                    prop("mode", "string"),
                     prop("filePath", "string"),
+                    prop("newFilePath", "string"),
                     prop("patchText", "string"),
+                    prop("content", "string"),
                     prop("patchMode", "string"),
                     prop("hashCheckMode", "boolean"),
                     prop("hashCode", "string"),
@@ -287,51 +268,30 @@ fn tools() -> Vec<Value> {
             true,
         ),
         executor_tool(
+            "set_default_shell",
+            "Set and persist the default exbash shell profile on the target Executor",
+            schema(&["shell"], &[prop("shell", "string")]),
+            false,
+        ),
+        executor_tool(
             "exbash",
-            "Run a command directly without shell wrapping; command input must be at most 4KB; detaches if it exceeds read_timeout",
+            "Run, shell-run, list, attach, stop, or remove a PTY-backed command using mode",
             schema(
-                &["command"],
+                &["mode"],
                 &[
+                    prop("mode", "string"),
                     prop_desc("command", "string", "Command input must be at most 4KB"),
+                    prop("shell", "string"),
                     prop("description", "string"),
                     prop("timeout", "number"),
                     prop("read_timeout", "number"),
-                ],
-            ),
-            true,
-        ),
-        executor_tool(
-            "exbash_list",
-            "List exbash runs",
-            schema(&[], &[prop("asyncID", "string")]),
-            false,
-        ),
-        executor_tool(
-            "exbash_attach",
-            "Write input and return a plain-text PTY snapshot after read_timeout; text input must be at most 4KB",
-            schema(
-                &["asyncID"],
-                &[
                     prop("asyncID", "string"),
                     prop_desc("text", "string", "Text input must be at most 4KB"),
                     prop("filePath", "string"),
-                    prop("read_timeout", "number"),
                     prop("showRawPretty", "boolean"),
                 ],
             ),
-            false,
-        ),
-        executor_tool(
-            "exbash_stop",
-            "Stop an exbash run",
-            schema(&["asyncID"], &[prop("asyncID", "string")]),
-            false,
-        ),
-        executor_tool(
-            "exbash_remove",
-            "Remove a stopped exbash run",
-            schema(&["asyncID"], &[prop("asyncID", "string")]),
-            false,
+            true,
         ),
         executor_tool(
             "rg",
