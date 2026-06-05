@@ -138,6 +138,10 @@ impl ShellManager {
         self.core.snapshot_pty(pty)
     }
 
+    pub fn subscribe_exit_code(&self, pty: &str) -> Result<mpsc::UnboundedReceiver<u32>> {
+        self.core.subscribe_exit_code(pty)
+    }
+
     fn attach_client_details(&self, summary: CoreSessionSummary) -> SessionSummary {
         let client_details = self.client_details(&summary.pty);
         SessionSummary {
@@ -277,22 +281,17 @@ impl ShellManager {
 
         let pty = pty.to_string();
         let manager = self.clone();
+        let mut rx = match manager.subscribe_exit_code(&pty) {
+            Ok(rx) => rx,
+            Err(err) => {
+                eprintln!("exit watcher error for {pty}: {err:#}");
+                manager.exit_watchers.lock().unwrap().remove(&pty);
+                return;
+            }
+        };
         tokio::spawn(async move {
-            loop {
-                let Some(session) = manager.core.session(&pty) else {
-                    break;
-                };
-                match session.try_exit_code() {
-                    Ok(Some(_)) => {
-                        manager.broadcast_meta(&pty);
-                        break;
-                    }
-                    Ok(None) => time::sleep(Duration::from_millis(100)).await,
-                    Err(err) => {
-                        eprintln!("exit watcher error for {pty}: {err:#}");
-                        break;
-                    }
-                }
+            if rx.recv().await.is_some() {
+                manager.broadcast_meta(&pty);
             }
             manager.exit_watchers.lock().unwrap().remove(&pty);
         });

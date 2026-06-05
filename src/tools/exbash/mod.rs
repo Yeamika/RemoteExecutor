@@ -140,6 +140,15 @@ pub async fn exbash(mut options: ExbashOptions, ctx: &ToolContext) -> Result<Too
     }
 }
 
+pub fn exbash_run_detail(
+    manager: &crate::ShellManager,
+    async_id: &str,
+) -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(runs::run_detail(
+        manager, async_id, None, None,
+    )?)?)
+}
+
 async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let read_timeout = options.read_timeout.unwrap_or(READ_TIMEOUT);
     let mut job = start_job(&options, ctx).await?;

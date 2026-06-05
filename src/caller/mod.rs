@@ -10,8 +10,8 @@ mod stdio_test;
 mod test;
 
 use crate::{
-    start_shared_executor_ws, tool_output, Executor, ExecutorInfo, ExecutorRequest,
-    ExecutorResponse, SettingsStore, ShellManager, ToolResult,
+    exbash_run_detail, start_shared_executor_ws, tool_output, Executor, ExecutorInfo,
+    ExecutorRequest, ExecutorResponse, SettingsStore, ShellManager, ToolResult,
 };
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -59,6 +59,7 @@ pub struct SetDefaultExecutorOptions {
 pub struct Caller {
     state: Arc<Mutex<CallerState>>,
     write_lock: Arc<Mutex<()>>,
+    local_shell_manager: ShellManager,
 }
 
 #[derive(Clone)]
@@ -93,7 +94,7 @@ impl Caller {
             .with_shell_manager(shell_manager.clone())
             .with_settings_store(settings);
         let local_info = local.info().clone();
-        let local_addr = start_shared_executor_ws("127.0.0.1:0", local, shell_manager)?;
+        let local_addr = start_shared_executor_ws("127.0.0.1:0", local, shell_manager.clone())?;
         let local_endpoint = ExecutorEndpoint {
             info: local_info,
             url: format!("ws://{local_addr}"),
@@ -107,7 +108,19 @@ impl Caller {
                 executors,
             })),
             write_lock: Arc::new(Mutex::new(())),
+            local_shell_manager: shell_manager,
         })
+    }
+
+    pub fn subscribe_local_exit_code(
+        &self,
+        async_id: &str,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<u32>> {
+        self.local_shell_manager.subscribe_exit_code(async_id)
+    }
+
+    pub fn local_exbash_run_detail(&self, async_id: &str) -> Result<Value> {
+        exbash_run_detail(&self.local_shell_manager, async_id)
     }
 
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {

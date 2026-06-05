@@ -8,6 +8,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use tempfile::tempdir;
+use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -97,6 +98,40 @@ async fn caller_local_executor_accepts_pty_protocol() {
         panic!("expected session list");
     };
     assert!(sessions.iter().any(|session| session.pty == "main"));
+}
+
+#[tokio::test]
+async fn caller_exposes_local_exit_events_only_through_binary_api() {
+    let dir = tempdir().unwrap();
+    let caller = Caller::new().await.unwrap();
+    let response = caller
+        .handle(ExecutorRequest {
+            id: json!("local-exit-event"),
+            method: "exbash".to_string(),
+            params: json!({
+                "mode": "run",
+                "command": "sh -lc 'sleep 0.05; exit 6'",
+                "read_timeout": 0
+            }),
+            directory: Some(dir.path().to_path_buf()),
+            executor: Some("local".to_string()),
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap();
+    let mut rx = caller.subscribe_local_exit_code(async_id).unwrap();
+    let code = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(code, 6);
+
+    let detail = caller.local_exbash_run_detail(async_id).unwrap();
+    assert_eq!(detail["asyncID"], json!(async_id));
+    assert_eq!(detail["exitCode"], json!(6));
 }
 
 #[tokio::test]

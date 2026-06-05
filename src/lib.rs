@@ -24,7 +24,7 @@ pub use settings::{
     SettingsStore, ShellProfile, ShellResolution, ShellSettings,
 };
 pub use shell_manager::ShellManager;
-pub use tools::exbash::{exbash, ExbashOptions, ExbashOutput};
+pub use tools::exbash::{exbash, exbash_run_detail, ExbashOptions, ExbashOutput};
 pub use tools::file_action::{
     file_action, FileActionMode, FileActionOptions, PatchFile, PatchMode,
 };
