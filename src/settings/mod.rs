@@ -75,6 +75,9 @@ pub struct SetDefaultShellOptions {
     pub shell: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct ListShellsOptions {}
+
 impl Default for ReSettings {
     fn default() -> Self {
         Self {
@@ -253,6 +256,27 @@ pub fn set_default_shell(
         "defaultShell": options.shell.trim(),
         "resolution": resolution,
         "settingsPath": settings.path().to_string_lossy(),
+    });
+    Ok(crate::ToolResult {
+        metadata: metadata.clone(),
+        output: crate::tool_output(serde_json::to_string_pretty(&metadata)?),
+    })
+}
+
+pub fn list_shells(
+    _options: ListShellsOptions,
+    ctx: &crate::ToolContext,
+) -> Result<crate::ToolResult> {
+    let settings = ctx
+        .settings_store()
+        .ok_or_else(|| anyhow!("settings store is not available"))?;
+    let settings_path = settings.path().to_string_lossy().into_owned();
+    let shell_settings = settings.settings()?.shells;
+    let metadata = json!({
+        "default": shell_settings.default,
+        "interactive": shell_settings.interactive,
+        "profiles": shell_settings.profiles,
+        "settingsPath": settings_path,
     });
     Ok(crate::ToolResult {
         metadata: metadata.clone(),

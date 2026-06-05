@@ -78,6 +78,7 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(exbash_properties.get("targetExecutor").is_some());
     assert!(exbash_properties.get("directory").is_some());
     assert!(tools.iter().any(|tool| tool["name"] == "set_default_shell"));
+    assert!(tools.iter().any(|tool| tool["name"] == "list_shells"));
 }
 
 #[tokio::test]

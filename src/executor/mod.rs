@@ -4,10 +4,10 @@ mod test;
 mod ws;
 
 use crate::{
-    exbash, file_action, glob_paths, read_path, rg_search, set_default_shell, stat_path,
-    tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest, ExecutorResponse, FileActionOptions,
-    GlobOptions, ReadOptions, RgOptions, SetDefaultShellOptions, SettingsStore, ShellManager,
-    StatOptions, ToolContext, ToolResult,
+    exbash, file_action, glob_paths, list_shells, read_path, rg_search, set_default_shell,
+    stat_path, tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest, ExecutorResponse,
+    FileActionOptions, GlobOptions, ListShellsOptions, ReadOptions, RgOptions,
+    SetDefaultShellOptions, SettingsStore, ShellManager, StatOptions, ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -203,6 +203,7 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
             serde_json::from_value::<SetDefaultShellOptions>(params)?,
             ctx,
         ),
+        "list_shells" => list_shells(serde_json::from_value::<ListShellsOptions>(params)?, ctx),
         "rg" => {
             let output = rg_search(serde_json::from_value::<RgOptions>(params)?).await?;
             Ok(ToolResult {

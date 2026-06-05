@@ -274,6 +274,12 @@ fn tools() -> Vec<Value> {
             false,
         ),
         executor_tool(
+            "list_shells",
+            "List configured exbash shell profiles on the target Executor",
+            schema(&[], &[]),
+            false,
+        ),
+        executor_tool(
             "exbash",
             "Run, shell-run, list, attach, stop, or remove a PTY-backed command using mode",
             schema(

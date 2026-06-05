@@ -153,6 +153,38 @@ async fn set_default_shell_saves_settings_and_updates_default() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn list_shells_returns_executor_settings() {
+    let dir = tempdir().unwrap();
+    let settings_path = dir.path().join(".re-setting.json");
+    fs::write(&settings_path, shell_settings("one")).unwrap();
+
+    let settings = SettingsStore::load(Some(settings_path.clone())).unwrap();
+    let executor = Executor::local("list-shells").with_settings_store(settings);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!("list-shells"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    assert_eq!(result["metadata"]["default"], "one");
+    assert!(result["metadata"]["profiles"]["one"]["commandArgs"][1]
+        .as_str()
+        .unwrap()
+        .contains("one-marker"));
+    assert_eq!(
+        result["metadata"]["settingsPath"].as_str().unwrap(),
+        settings_path.to_string_lossy()
+    );
+}
+
+#[cfg(unix)]
 fn shell_settings(default_shell: &str) -> String {
     json!({
         "version": 1,
