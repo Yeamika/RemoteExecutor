@@ -252,6 +252,16 @@ pub fn set_default_shell(
         .settings_store()
         .ok_or_else(|| anyhow!("settings store is not available"))?;
     let resolution = settings.set_default_shell(&options.shell)?;
+    let output = format!(
+        "defaultShell:{}\nsettingsPath:{}\nresolution: requested={} profile={} program={} args={} settingsPath={}",
+        options.shell.trim(),
+        settings.path().to_string_lossy(),
+        resolution.requested,
+        resolution.profile,
+        resolution.program,
+        display_args(&resolution.args),
+        resolution.settings_path,
+    );
     let metadata = json!({
         "defaultShell": options.shell.trim(),
         "resolution": resolution,
@@ -259,7 +269,7 @@ pub fn set_default_shell(
     });
     Ok(crate::ToolResult {
         metadata: metadata.clone(),
-        output: crate::tool_output(serde_json::to_string_pretty(&metadata)?),
+        output: crate::tool_output(output),
     })
 }
 
@@ -272,6 +282,7 @@ pub fn list_shells(
         .ok_or_else(|| anyhow!("settings store is not available"))?;
     let settings_path = settings.path().to_string_lossy().into_owned();
     let shell_settings = settings.settings()?.shells;
+    let output = format_shell_settings(&shell_settings, &settings_path);
     let metadata = json!({
         "default": shell_settings.default,
         "interactive": shell_settings.interactive,
@@ -280,8 +291,46 @@ pub fn list_shells(
     });
     Ok(crate::ToolResult {
         metadata: metadata.clone(),
-        output: crate::tool_output(serde_json::to_string_pretty(&metadata)?),
+        output: crate::tool_output(output),
     })
+}
+
+fn format_shell_settings(settings: &ShellSettings, settings_path: &str) -> String {
+    let mut lines = vec![
+        format!("default:{}", settings.default),
+        format!("interactive:{}", settings.interactive),
+        format!("settingsPath:{settings_path}"),
+        "profiles:".to_string(),
+    ];
+    if settings.profiles.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        lines.extend(settings.profiles.iter().map(|(name, profile)| {
+            format!(
+                "- {name}: candidates={} commandArgs={} interactiveArgs={}",
+                display_args(&profile.candidates),
+                display_args(&profile.command_args),
+                display_args(&profile.interactive_args)
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
+fn display_args(args: &[String]) -> String {
+    if args.is_empty() {
+        return "<none>".to_string();
+    }
+    args.iter()
+        .map(|arg| {
+            if arg.is_empty() {
+                "<empty>".to_string()
+            } else {
+                arg.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn load_settings_file(path: &Path) -> Result<(ReSettings, Option<FileStamp>)> {

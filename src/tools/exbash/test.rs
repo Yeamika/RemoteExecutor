@@ -134,6 +134,11 @@ async fn set_default_shell_saves_settings_and_updates_default() {
         })
         .await;
     assert!(set.ok, "{:?}", set.error);
+    let set_output = set.result.as_ref().unwrap()["output"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(set_output.starts_with("defaultShell:two\nsettingsPath:"));
+    assert!(set_output.contains("\nresolution: requested=two profile=two program=sh"));
     assert!(fs::read_to_string(&settings_path)
         .unwrap()
         .contains("\"default\": \"two\""));
@@ -173,6 +178,12 @@ async fn list_shells_returns_executor_settings() {
         .await;
     assert!(response.ok, "{:?}", response.error);
     let result = response.result.unwrap();
+    let output = result["output"]["text"].as_str().unwrap();
+    assert!(output.starts_with("default:one\ninteractive:one\nsettingsPath:"));
+    assert!(output.contains("profiles:\n- "));
+    assert!(output.contains(
+        "- one: candidates=sh commandArgs=-c echo one-marker; {command} interactiveArgs=<none>"
+    ));
     assert_eq!(result["metadata"]["default"], "one");
     assert!(result["metadata"]["profiles"]["one"]["commandArgs"][1]
         .as_str()
