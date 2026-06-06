@@ -207,7 +207,7 @@ impl SettingsStore {
         if shell.is_empty() {
             return Err(anyhow!("shell is required"));
         }
-        let resolution = self.resolve_shell(shell, None, false)?;
+        let resolution = self.resolve_shell(shell, None, false, None)?;
         {
             let mut state = self.inner.lock().unwrap();
             state.settings.shells.default = shell.to_string();
@@ -223,14 +223,15 @@ impl SettingsStore {
         command: &str,
         cwd: &Path,
     ) -> Result<CommandSpec> {
-        let resolution = self.resolve_shell(shell.unwrap_or_default(), Some(command), false)?;
+        let resolution =
+            self.resolve_shell(shell.unwrap_or_default(), Some(command), false, Some(cwd))?;
         Ok(CommandSpec::new(resolution.program)
             .args(resolution.args.iter().map(String::as_str))
             .cwd(cwd.to_path_buf()))
     }
 
     pub fn interactive_command_spec(&self) -> Result<CommandSpec> {
-        let resolution = self.resolve_shell("", None, true)?;
+        let resolution = self.resolve_shell("", None, true, None)?;
         Ok(CommandSpec::new(resolution.program).args(resolution.args.iter().map(String::as_str)))
     }
 
@@ -239,6 +240,7 @@ impl SettingsStore {
         requested: &str,
         command: Option<&str>,
         interactive: bool,
+        search_root: Option<&Path>,
     ) -> Result<ShellResolution> {
         let settings = self.inner.lock().unwrap().settings.clone();
         let requested = requested.trim();
@@ -258,7 +260,7 @@ impl SettingsStore {
                 self.path.display()
             )
         })?;
-        let program = self.resolve_candidate(&profile_name, profile)?;
+        let program = self.resolve_candidate(&profile_name, profile, search_root)?;
         let args = if interactive {
             profile.interactive_args.clone()
         } else {
@@ -277,8 +279,18 @@ impl SettingsStore {
         })
     }
 
-    fn resolve_candidate(&self, profile_name: &str, profile: &ShellProfile) -> Result<String> {
+    fn resolve_candidate(
+        &self,
+        profile_name: &str,
+        profile: &ShellProfile,
+        search_root: Option<&Path>,
+    ) -> Result<String> {
         for candidate in &profile.candidates {
+            if let Some(search_root) = search_root {
+                if let Some(program) = resolve_program(candidate, search_root) {
+                    return Ok(program);
+                }
+            }
             if let Some(program) = resolve_program(candidate, &self.root) {
                 return Ok(program);
             }

@@ -3,6 +3,8 @@ use crate::{Executor, ExecutorInfo, ExecutorRequest, SettingsStore, ShellManager
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -374,6 +376,107 @@ async fn standalone_executor_uses_only_base_settings_for_shells() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn standalone_executor_resolves_shell_candidate_from_workdir_then_base() {
+    let base = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let base_settings = base.path().join(".re-setting.json");
+    fs::write(&base_settings, shell_settings_with_zbash_candidate()).unwrap();
+    write_zbash_marker(workspace.path(), "standalone-workdir-zbash");
+
+    let settings = SettingsStore::load(Some(base_settings)).unwrap();
+    let executor = Executor::new(ExecutorInfo {
+        id: "standalone-workdir-shell".to_string(),
+        system: None,
+        device: None,
+        labels: BTreeMap::new(),
+    })
+    .with_shell_manager(ShellManager::default_shell(80, 24))
+    .with_settings_store(settings);
+
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!("standalone-workdir-shell"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell","command":"echo run", "read_timeout":2000}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+    })
+    .await;
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    assert!(result.to_string().contains("standalone-workdir-zbash"));
+    assert!(result["metadata"]["command"]
+        .as_str()
+        .unwrap()
+        .contains(".venv/bin/zbash -c echo run"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_executor_resolves_shell_candidate_from_workdir_workspace_then_base() {
+    let base = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let subdir = workspace.path().join("subdir");
+    fs::create_dir(&subdir).unwrap();
+    let base_settings = base.path().join(".re-setting.json");
+    fs::write(&base_settings, shell_settings_with_zbash_candidate()).unwrap();
+    write_zbash_marker(base.path(), "local-base-zbash");
+    write_zbash_marker(workspace.path(), "local-workspace-zbash");
+
+    let settings = SettingsStore::load(Some(base_settings)).unwrap();
+    let executor = Executor::local("local-shell-tree").with_settings_store(settings);
+
+    let workspace_hit = executor
+        .handle(ExecutorRequest {
+            id: json!("local-workspace-shell"),
+            method: "exbash".to_string(),
+            params: json!({
+                "mode":"shell",
+                "command":"echo run",
+                "workdir":"subdir",
+                "read_timeout":2000
+            }),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+    })
+    .await;
+    assert!(workspace_hit.ok, "{:?}", workspace_hit.error);
+    let workspace_result = workspace_hit.result.unwrap();
+    assert!(workspace_result.to_string().contains("local-workspace-zbash"));
+    assert!(workspace_result["metadata"]["command"]
+        .as_str()
+        .unwrap()
+        .contains(".venv/bin/zbash -c echo run"));
+
+    fs::remove_file(workspace.path().join(".venv/bin/zbash")).unwrap();
+    let base_hit = executor
+        .handle(ExecutorRequest {
+            id: json!("local-base-shell"),
+            method: "exbash".to_string(),
+            params: json!({
+                "mode":"shell",
+                "command":"echo run",
+                "workdir":"subdir",
+                "read_timeout":2000
+            }),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+    })
+    .await;
+    assert!(base_hit.ok, "{:?}", base_hit.error);
+    let base_result = base_hit.result.unwrap();
+    assert!(base_result.to_string().contains("local-base-zbash"));
+    assert!(base_result["metadata"]["command"]
+        .as_str()
+        .unwrap()
+        .contains(".venv/bin/zbash -c echo run"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn directory_settings_bad_reload_reports_error_and_keeps_last_good() {
     let workspace = tempdir().unwrap();
     let settings_path = workspace.path().join(".re-setting.json");
@@ -637,6 +740,40 @@ fn shell_settings(default_shell: &str) -> String {
         }
     })
     .to_string()
+}
+
+#[cfg(unix)]
+fn shell_settings_with_zbash_candidate() -> String {
+    json!({
+        "version": 1,
+        "shells": {
+            "default": "zbash",
+            "interactive": "bash",
+            "profiles": {
+                "zbash": {
+                    "candidates": [".venv/bin/zbash", "sh"],
+                    "commandArgs": ["-c", "{command}"],
+                    "interactiveArgs": []
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+#[cfg(unix)]
+fn write_zbash_marker(root: &std::path::Path, marker: &str) {
+    let bin = root.join(".venv/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("zbash");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\nprintf '{}\\n'\nexec sh \"$@\"\n", marker),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(script, permissions).unwrap();
 }
 
 #[cfg(unix)]

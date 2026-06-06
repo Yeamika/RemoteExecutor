@@ -156,7 +156,13 @@ async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRe
         job.manager.remove_pty(&job.async_id);
         clear_exit_code_label(&job.async_id);
         return Ok(ToolResult {
-            metadata: json!({ "output": clip(&output), "exitCode": detail.exit_code }),
+            metadata: json!({
+                "output": clip(&output),
+                "exitCode": detail.exit_code,
+                "command": detail.command,
+                "cwd": detail.cwd,
+                "totalOutput": detail.total_output,
+            }),
             output: tool_output(output),
         });
     }
