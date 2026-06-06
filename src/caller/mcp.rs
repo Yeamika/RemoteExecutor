@@ -292,7 +292,11 @@ fn tools() -> Vec<Value> {
                     prop("timeout", "number"),
                     prop("read_timeout", "number"),
                     prop("asyncID", "string"),
-                    prop_desc("text", "string", "Text input must be at most 4KB"),
+                    prop_desc(
+                        "text",
+                        "string",
+                        "Text input for attach mode, at most 4KB after escape parsing. Interactive programs may require control bytes; use \\n for Enter/newline and \\u0003 for Ctrl-C/control bytes.",
+                    ),
                     prop("filePath", "string"),
                     prop("showRawPretty", "boolean"),
                 ],

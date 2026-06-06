@@ -42,7 +42,7 @@ Common fields:
 | `timeout` | Total runtime in ms. Omit, `0`, or `-1` means no total timeout. |
 | `read_timeout` | Read wait in ms. Defaults to `10000`. |
 | `asyncID` | Run id for `list`, `attach`, `stop`, and `remove`. |
-| `text` | Text input for `attach`, limited to 4096 bytes after escape parsing. |
+| `text` | Text input for `attach`, limited to 4096 bytes after escape parsing. Interactive programs may require control bytes; use `\n` for Enter/newline and `\u0003` for Ctrl-C/control bytes. |
 | `filePath` | File input for `attach`, limited to 4096 bytes. |
 | `workdir` | Optional cwd for `run` and `shell`. Relative paths resolve against the top-level RPC `directory`. |
 | `showRawPretty` | Adds `rawPretty` to attach metadata. |
