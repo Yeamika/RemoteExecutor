@@ -79,6 +79,13 @@ async fn mcp_initialize_and_lists_tools() {
     assert!(exbash_properties.get("directory").is_some());
     assert!(tools.iter().any(|tool| tool["name"] == "set_default_shell"));
     assert!(tools.iter().any(|tool| tool["name"] == "list_shells"));
+    let request_reload = tools
+        .iter()
+        .find(|tool| tool["name"] == "request_reload")
+        .unwrap();
+    let reload_properties = &request_reload["inputSchema"]["properties"];
+    assert!(reload_properties.get("targetExecutor").is_some());
+    assert!(reload_properties.get("directory").is_none());
 }
 
 #[tokio::test]

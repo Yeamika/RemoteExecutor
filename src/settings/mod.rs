@@ -27,6 +27,7 @@ struct SettingsState {
     settings: ReSettings,
     stamp: Option<FileStamp>,
     base_stamp: Option<FileStamp>,
+    reload_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +80,9 @@ pub struct SetDefaultShellOptions {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct RequestReloadOptions {}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct ListShellsOptions {}
 
 impl Default for ReSettings {
@@ -127,6 +131,7 @@ impl SettingsStore {
                 settings,
                 stamp,
                 base_stamp,
+                reload_error: None,
             })),
         })
     }
@@ -162,6 +167,7 @@ impl SettingsStore {
                 settings: with_default_profiles(settings),
                 stamp: None,
                 base_stamp: None,
+                reload_error: None,
             })),
         }
     }
@@ -171,8 +177,29 @@ impl SettingsStore {
     }
 
     pub fn settings(&self) -> Result<ReSettings> {
-        self.reload_if_changed()?;
         Ok(self.inner.lock().unwrap().settings.clone())
+    }
+
+    pub fn reload_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().reload_error.clone()
+    }
+
+    pub fn reload(&self) -> Result<()> {
+        match load_settings_layers(self.base_path.as_deref(), &self.path) {
+            Ok((settings, base_stamp, stamp)) => {
+                let mut state = self.inner.lock().unwrap();
+                state.settings = settings;
+                state.base_stamp = base_stamp;
+                state.stamp = stamp;
+                state.reload_error = None;
+                Ok(())
+            }
+            Err(err) => {
+                let message = self.format_reload_error(&err);
+                self.record_reload_error(message.clone());
+                Err(anyhow!(message))
+            }
+        }
     }
 
     pub fn set_default_shell(&self, shell: &str) -> Result<ShellResolution> {
@@ -185,6 +212,7 @@ impl SettingsStore {
             let mut state = self.inner.lock().unwrap();
             state.settings.shells.default = shell.to_string();
             state.stamp = write_settings_file(&self.path, &state.settings)?;
+            state.reload_error = None;
         }
         Ok(resolution)
     }
@@ -212,7 +240,6 @@ impl SettingsStore {
         command: Option<&str>,
         interactive: bool,
     ) -> Result<ShellResolution> {
-        self.reload_if_changed()?;
         let settings = self.inner.lock().unwrap().settings.clone();
         let requested = requested.trim();
         let configured = if requested.is_empty() {
@@ -267,24 +294,26 @@ impl SettingsStore {
         ))
     }
 
-    fn reload_if_changed(&self) -> Result<()> {
-        let current = file_stamp(&self.path)?;
-        let current_base = self
-            .base_path
-            .as_deref()
-            .map(file_stamp)
-            .transpose()?
-            .flatten();
-        let mut state = self.inner.lock().unwrap();
-        if state.stamp == current && state.base_stamp == current_base {
-            return Ok(());
+    fn record_reload_error(&self, error: String) {
+        self.inner.lock().unwrap().reload_error = Some(error);
+    }
+
+    fn format_reload_error(&self, err: &anyhow::Error) -> String {
+        let mut lines = vec![
+            "reloaded:false".to_string(),
+            format!("settingsPath:{}", self.path.display()),
+        ];
+        if let Some(base_path) = &self.base_path {
+            lines.push(format!("baseSettingsPath:{}", base_path.display()));
         }
-        let (settings, base_stamp, stamp) =
-            load_settings_layers(self.base_path.as_deref(), &self.path)?;
-        state.settings = settings;
-        state.base_stamp = base_stamp;
-        state.stamp = stamp;
-        Ok(())
+        for (index, cause) in err.chain().enumerate() {
+            if index == 0 {
+                lines.push(format!("error:{cause}"));
+            } else {
+                lines.push(format!("cause:{cause}"));
+            }
+        }
+        lines.join("\n")
     }
 }
 
@@ -326,8 +355,37 @@ pub fn list_shells(
         .ok_or_else(|| anyhow!("settings store is not available"))?;
     let settings_path = settings.path().to_string_lossy().into_owned();
     let shell_settings = settings.settings()?.shells;
-    let output = format_shell_settings(&shell_settings, &settings_path);
+    let reload_error = settings.reload_error();
+    let output = format_shell_settings(&shell_settings, &settings_path, reload_error.as_deref());
     let metadata = json!({
+        "default": shell_settings.default,
+        "interactive": shell_settings.interactive,
+        "profiles": shell_settings.profiles,
+        "settingsPath": settings_path,
+        "settingsError": reload_error,
+    });
+    Ok(crate::ToolResult {
+        metadata: metadata.clone(),
+        output: crate::tool_output(output),
+    })
+}
+
+pub fn request_reload(
+    _options: RequestReloadOptions,
+    ctx: &crate::ToolContext,
+) -> Result<crate::ToolResult> {
+    let settings = ctx
+        .settings_store()
+        .ok_or_else(|| anyhow!("settings store is not available"))?;
+    settings.reload()?;
+    let settings_path = settings.path().to_string_lossy().into_owned();
+    let shell_settings = settings.settings()?.shells;
+    let output = format!(
+        "reloaded:true\n{}",
+        format_shell_settings(&shell_settings, &settings_path, None)
+    );
+    let metadata = json!({
+        "reloaded": true,
         "default": shell_settings.default,
         "interactive": shell_settings.interactive,
         "profiles": shell_settings.profiles,
@@ -339,7 +397,11 @@ pub fn list_shells(
     })
 }
 
-fn format_shell_settings(settings: &ShellSettings, settings_path: &str) -> String {
+fn format_shell_settings(
+    settings: &ShellSettings,
+    settings_path: &str,
+    reload_error: Option<&str>,
+) -> String {
     let mut lines = vec![
         format!("default:{}", settings.default),
         format!("interactive:{}", settings.interactive),
@@ -357,6 +419,9 @@ fn format_shell_settings(settings: &ShellSettings, settings_path: &str) -> Strin
                 display_args(&profile.interactive_args)
             )
         }));
+    }
+    if let Some(error) = reload_error {
+        lines.push(format!("settingsError:{error}"));
     }
     lines.join("\n")
 }
@@ -393,7 +458,9 @@ fn load_settings_layers(
     json_merge(&mut value, overlay);
     let settings = serde_json::from_value::<ReSettings>(value)
         .with_context(|| format!("failed to parse merged settings for {}", path.display()))?;
-    Ok((with_default_profiles(settings), base_stamp, stamp))
+    let settings = with_default_profiles(settings);
+    validate_shell_settings(&settings, path)?;
+    Ok((settings, base_stamp, stamp))
 }
 
 fn load_settings_value(path: &Path) -> Result<(Value, Option<FileStamp>)> {
@@ -475,6 +542,27 @@ fn with_default_profiles(mut settings: ReSettings) -> ReSettings {
         settings.shells.interactive = auto_string();
     }
     settings
+}
+
+fn validate_shell_settings(settings: &ReSettings, path: &Path) -> Result<()> {
+    validate_shell_profile_ref("default", &settings.shells.default, settings, path)?;
+    validate_shell_profile_ref("interactive", &settings.shells.interactive, settings, path)
+}
+
+fn validate_shell_profile_ref(
+    field: &str,
+    value: &str,
+    settings: &ReSettings,
+    path: &Path,
+) -> Result<()> {
+    let profile_name = resolve_profile_name(value);
+    if settings.shells.profiles.contains_key(&profile_name) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "shells.{field} references missing profile `{profile_name}` in {}",
+        path.display()
+    ))
 }
 
 fn resolve_profile_name(name: &str) -> String {

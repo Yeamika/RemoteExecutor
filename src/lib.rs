@@ -20,8 +20,9 @@ pub use protocol::{
     ExecutorResponse, ToolResult,
 };
 pub use settings::{
-    list_shells, set_default_shell, ListShellsOptions, ReSettings, SetDefaultShellOptions,
-    SettingsStore, ShellProfile, ShellResolution, ShellSettings,
+    list_shells, request_reload, set_default_shell, ListShellsOptions, ReSettings,
+    RequestReloadOptions, SetDefaultShellOptions, SettingsStore, ShellProfile, ShellResolution,
+    ShellSettings,
 };
 pub use shell_manager::ShellManager;
 pub use tools::exbash::{exbash, exbash_run_detail, ExbashOptions, ExbashOutput};

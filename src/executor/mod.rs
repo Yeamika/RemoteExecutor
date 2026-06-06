@@ -4,16 +4,19 @@ mod test;
 mod ws;
 
 use crate::{
-    exbash, file_action, glob_paths, list_shells, read_path, rg_search, set_default_shell,
-    stat_path, tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest, ExecutorResponse,
-    FileActionOptions, GlobOptions, ListShellsOptions, ReadOptions, RgOptions,
-    SetDefaultShellOptions, SettingsStore, ShellManager, StatOptions, ToolContext, ToolResult,
+    exbash, file_action, glob_paths, list_shells, read_path, request_reload, rg_search,
+    set_default_shell, stat_path, tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest,
+    ExecutorResponse, FileActionOptions, GlobOptions, ListShellsOptions, ReadOptions,
+    RequestReloadOptions, RgOptions, SetDefaultShellOptions, SettingsStore, ShellManager,
+    StatOptions, ToolContext, ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::accept_async;
@@ -27,6 +30,8 @@ pub struct Executor {
     info: ExecutorInfo,
     shell_manager: Option<ShellManager>,
     settings_store: SettingsStore,
+    directory_settings: Arc<Mutex<BTreeMap<PathBuf, SettingsStore>>>,
+    workspace_settings: bool,
 }
 
 impl Executor {
@@ -35,6 +40,8 @@ impl Executor {
             info,
             shell_manager: None,
             settings_store: SettingsStore::load_default_lossy(),
+            directory_settings: Arc::new(Mutex::new(BTreeMap::new())),
+            workspace_settings: false,
         }
     }
     pub fn local(id: impl Into<String>) -> Self {
@@ -45,6 +52,7 @@ impl Executor {
             labels: BTreeMap::new(),
         })
         .with_shell_manager(ShellManager::default_shell(80, 24))
+        .with_workspace_settings()
     }
 
     pub fn info(&self) -> &ExecutorInfo {
@@ -58,21 +66,23 @@ impl Executor {
 
     pub fn with_settings_store(mut self, settings_store: SettingsStore) -> Self {
         self.settings_store = settings_store;
+        self.directory_settings = Arc::new(Mutex::new(BTreeMap::new()));
         self
     }
+
+    pub fn with_workspace_settings(mut self) -> Self {
+        self.workspace_settings = true;
+        self
+    }
+
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
         let method = request.method.clone();
         let directory = request.directory.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
         let params = apply_soft_timeout_param(&method, request.params, request.tool_timeout_ms);
-        let settings_store = match directory
-            .as_deref()
-            .map(|directory| self.settings_store.for_directory(directory))
-            .transpose()
-        {
-            Ok(Some(settings)) => settings,
-            Ok(None) => self.settings_store.clone(),
+        let settings_store = match self.settings_for_request(directory.as_deref()) {
+            Ok(settings) => settings,
             Err(err) => {
                 return ExecutorResponse::err(id, Some(self.info.id.clone()), err.to_string())
             }
@@ -105,6 +115,32 @@ impl Executor {
             }
             Err(err) => ExecutorResponse::err(id, Some(self.info.id.clone()), err.to_string()),
         }
+    }
+
+    fn settings_for_request(&self, directory: Option<&Path>) -> Result<SettingsStore> {
+        if self.workspace_settings {
+            if let Some(directory) = directory {
+                return self.settings_for_directory(directory);
+            }
+        }
+        Ok(self.settings_store.clone())
+    }
+
+    fn settings_for_directory(&self, directory: &Path) -> Result<SettingsStore> {
+        let key = if directory.is_absolute() {
+            directory.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(directory)
+        };
+        if let Some(settings) = self.directory_settings.lock().unwrap().get(&key).cloned() {
+            return Ok(settings);
+        }
+        let settings = self.settings_store.for_directory(&key)?;
+        self.directory_settings
+            .lock()
+            .unwrap()
+            .insert(key, settings.clone());
+        Ok(settings)
     }
 }
 
@@ -237,6 +273,9 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
             ctx,
         ),
         "list_shells" => list_shells(serde_json::from_value::<ListShellsOptions>(params)?, ctx),
+        "request_reload" => {
+            request_reload(serde_json::from_value::<RequestReloadOptions>(params)?, ctx)
+        }
         "rg" => {
             let output = rg_search(serde_json::from_value::<RgOptions>(params)?).await?;
             Ok(ToolResult {

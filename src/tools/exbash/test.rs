@@ -1,6 +1,7 @@
 use super::runs::{format_run_details, RunDetail};
-use crate::{Executor, ExecutorRequest, SettingsStore, ShellManager};
+use crate::{Executor, ExecutorInfo, ExecutorRequest, SettingsStore, ShellManager};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -98,7 +99,7 @@ async fn exbash_mode_shell_wraps_command_with_platform_shell() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn exbash_mode_shell_uses_hot_reloaded_default_shell() {
+async fn exbash_mode_shell_uses_request_reload_for_default_shell_changes() {
     let dir = tempdir().unwrap();
     let settings_path = dir.path().join(".re-setting.json");
     fs::write(&settings_path, shell_settings("one")).unwrap();
@@ -121,6 +122,36 @@ async fn exbash_mode_shell_uses_hot_reloaded_default_shell() {
 
     std::thread::sleep(Duration::from_millis(10));
     fs::write(&settings_path, shell_settings("two")).unwrap();
+
+    let before_reload = executor
+        .handle(ExecutorRequest {
+            id: json!("before-reload-shell"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"shell","command":"echo run", "read_timeout":2000}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(before_reload.ok, "{:?}", before_reload.error);
+    assert!(before_reload
+        .result
+        .unwrap()
+        .to_string()
+        .contains("one-marker"));
+
+    let reload = executor
+        .handle(ExecutorRequest {
+            id: json!("request-reload"),
+            method: "request_reload".to_string(),
+            params: json!({}),
+            directory: Some(dir.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(reload.ok, "{:?}", reload.error);
+    assert!(reload.result.unwrap().to_string().contains("reloaded:true"));
 
     let second = executor
         .handle(ExecutorRequest {
@@ -292,6 +323,245 @@ async fn local_executor_uses_directory_settings_file() {
     assert!(
         second_settings.contains("\"default\":\"two\"")
             || second_settings.contains("\"default\": \"two\"")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn standalone_executor_uses_only_base_settings_for_shells() {
+    let base = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let base_settings = base.path().join(".re-setting.json");
+    let workspace_settings = workspace.path().join(".re-setting.json");
+    fs::write(&base_settings, shell_settings("one")).unwrap();
+    fs::write(&workspace_settings, shell_settings("two")).unwrap();
+
+    let settings = SettingsStore::load(Some(base_settings.clone())).unwrap();
+    let executor = Executor::new(ExecutorInfo {
+        id: "standalone-settings".to_string(),
+        system: None,
+        device: None,
+        labels: BTreeMap::new(),
+    })
+    .with_shell_manager(ShellManager::default_shell(80, 24))
+    .with_settings_store(settings);
+
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!("standalone-list"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let output = response.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(output.starts_with("default:one\n"), "{output}");
+    assert!(
+        output.contains(&format!("settingsPath:{}", base_settings.to_string_lossy())),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&workspace_settings.to_string_lossy().to_string()),
+        "{output}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_settings_bad_reload_reports_error_and_keeps_last_good() {
+    let workspace = tempdir().unwrap();
+    let settings_path = workspace.path().join(".re-setting.json");
+    fs::write(&settings_path, shell_settings("one")).unwrap();
+
+    let executor = Executor::local("directory-settings-bad-reload");
+    let first = executor
+        .handle(ExecutorRequest {
+            id: json!("list-before-bad"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(first.ok, "{:?}", first.error);
+    let first_text = first.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(first_text.starts_with("default:one\n"), "{first_text}");
+    assert!(!first_text.contains("settingsError:"), "{first_text}");
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&settings_path, "{ broken").unwrap();
+
+    let before_reload = executor
+        .handle(ExecutorRequest {
+            id: json!("list-before-bad-reload"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(before_reload.ok, "{:?}", before_reload.error);
+    let before_reload_text = before_reload.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        before_reload_text.starts_with("default:one\n"),
+        "{before_reload_text}"
+    );
+    assert!(
+        !before_reload_text.contains("settingsError:"),
+        "{before_reload_text}"
+    );
+
+    let bad_json_reload = executor
+        .handle(ExecutorRequest {
+            id: json!("reload-after-bad-json"),
+            method: "request_reload".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!bad_json_reload.ok);
+    assert!(bad_json_reload
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("failed to parse settings file"));
+
+    let bad_json = executor
+        .handle(ExecutorRequest {
+            id: json!("list-after-bad-json"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(bad_json.ok, "{:?}", bad_json.error);
+    let bad_json_text = bad_json.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        bad_json_text.starts_with("default:one\n"),
+        "{bad_json_text}"
+    );
+    assert!(
+        bad_json_text.contains("settingsError:reloaded:false"),
+        "{bad_json_text}"
+    );
+    assert!(
+        bad_json_text.contains("error:failed to parse settings file"),
+        "{bad_json_text}"
+    );
+    assert!(bad_json_text.contains("cause:"), "{bad_json_text}");
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(
+        &settings_path,
+        json!({
+            "shells": {
+                "default": "missing"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let bad_ref_reload = executor
+        .handle(ExecutorRequest {
+            id: json!("reload-after-bad-ref"),
+            method: "request_reload".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!bad_ref_reload.ok);
+    assert!(bad_ref_reload
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("shells.default references missing profile `missing`"));
+
+    let bad_ref = executor
+        .handle(ExecutorRequest {
+            id: json!("list-after-bad-ref"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(bad_ref.ok, "{:?}", bad_ref.error);
+    let bad_ref_text = bad_ref.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(bad_ref_text.starts_with("default:one\n"), "{bad_ref_text}");
+    assert!(
+        bad_ref_text.contains("settingsError:reloaded:false"),
+        "{bad_ref_text}"
+    );
+    assert!(
+        bad_ref_text.contains("error:shells.default references missing profile `missing`"),
+        "{bad_ref_text}"
+    );
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&settings_path, shell_settings("two")).unwrap();
+
+    let reload = executor
+        .handle(ExecutorRequest {
+            id: json!("reload-after-fix"),
+            method: "request_reload".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(reload.ok, "{:?}", reload.error);
+
+    let recovered = executor
+        .handle(ExecutorRequest {
+            id: json!("list-after-fix"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(workspace.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(recovered.ok, "{:?}", recovered.error);
+    let recovered_text = recovered.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        recovered_text.starts_with("default:two\n"),
+        "{recovered_text}"
+    );
+    assert!(
+        !recovered_text.contains("settingsError:"),
+        "{recovered_text}"
     );
 }
 

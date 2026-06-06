@@ -280,6 +280,12 @@ fn tools() -> Vec<Value> {
             false,
         ),
         executor_tool(
+            "request_reload",
+            "Reload and validate Executor settings from disk",
+            schema(&[], &[]),
+            false,
+        ),
+        executor_tool(
             "exbash",
             "Run, shell-run, list, attach, stop, or remove a PTY-backed command using mode",
             schema(
