@@ -350,6 +350,9 @@ fn apply_diffy_text_patch(before_text: &str, patch_text: &str) -> Result<String>
         patch_text
     };
     let patch = DiffyPatch::from_str(patch_source).context("failed to parse unified diff patch")?;
+    if patch.hunks().is_empty() {
+        return Err(anyhow!("patchText must contain at least one unified diff hunk"));
+    }
     diffy_apply(before_text, &patch).context("failed to apply unified diff patch")
 }
 

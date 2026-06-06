@@ -42,6 +42,29 @@ async fn apply_text_patch(initial: &str, patch_text: &str) -> String {
 }
 
 #[tokio::test]
+async fn file_action_rejects_non_patch_text_without_writing() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    fs::write(&path, "base\n").unwrap();
+    let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
+
+    let result = file_action(
+        patch_action(
+            path.clone(),
+            "this is not a unified diff",
+            PatchMode::Text,
+            false,
+            None,
+        ),
+        &ctx,
+    )
+    .await;
+
+    assert!(result.is_err(), "plain text patch should fail");
+    assert_eq!(fs::read_to_string(path).unwrap(), "base\n");
+}
+
+#[tokio::test]
 async fn file_action_applies_unified_diff_patch_with_hash_check() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
