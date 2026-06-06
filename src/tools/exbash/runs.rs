@@ -164,12 +164,27 @@ pub(crate) fn format_run_details(runs: &[RunDetail]) -> String {
                 .map(|code| format!(" exit={}", exit_code_value_text(code)))
                 .unwrap_or_default();
             format!(
-                "{} {}{} totalOutput={} command={}",
-                run.async_id, run.state, exit, run.total_output, run.command
+                "{} {}{} totalOutput={} description={} command={}",
+                run.async_id,
+                run.state,
+                exit,
+                run.total_output,
+                single_line_list_text(&run.description),
+                clipped_list_command(&run.command)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn clipped_list_command(command: &str) -> String {
+    single_line_list_text(command).chars().take(30).collect()
+}
+
+fn single_line_list_text(text: &str) -> String {
+    text.replace("\r\n", "\\n")
+        .replace('\n', "\\n")
+        .replace('\r', "\\n")
 }
 
 pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<RunDetail> {

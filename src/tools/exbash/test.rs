@@ -1,8 +1,33 @@
+use super::runs::{format_run_details, RunDetail};
 use crate::{Executor, ExecutorRequest, SettingsStore, ShellManager};
 use serde_json::json;
 use std::fs;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+#[test]
+fn exbash_list_formats_description_and_clipped_command() {
+    let text = format_run_details(&[RunDetail {
+        async_id: "rex-test".to_string(),
+        pid: None,
+        state: "running".to_string(),
+        exit_code: None,
+        total_output: 12,
+        command: "012345678901234567890123456789EXTRA\nnext".to_string(),
+        description: "full description\nwith newline".to_string(),
+        cwd: "/tmp".to_string(),
+        timeout: None,
+        started_at: 1,
+        ended_at: None,
+        error: None,
+    }]);
+
+    assert!(text.contains(
+        "totalOutput=12 description=full description\\nwith newline command=012345678901234567890123456789"
+    ));
+    assert!(!text.contains("EXTRA"));
+    assert!(!text.contains("description=full description\nwith newline"));
+}
 
 #[tokio::test]
 async fn executor_maps_rg_tool_timeout_to_soft_timeout() {
