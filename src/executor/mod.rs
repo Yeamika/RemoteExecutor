@@ -63,10 +63,21 @@ impl Executor {
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
         let method = request.method.clone();
+        let directory = request.directory.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
         let params = apply_soft_timeout_param(&method, request.params, request.tool_timeout_ms);
-        let mut ctx =
-            ToolContext::new(request.directory).with_settings_store(self.settings_store.clone());
+        let settings_store = match directory
+            .as_deref()
+            .map(SettingsStore::load_for_directory)
+            .transpose()
+        {
+            Ok(Some(settings)) => settings,
+            Ok(None) => self.settings_store.clone(),
+            Err(err) => {
+                return ExecutorResponse::err(id, Some(self.info.id.clone()), err.to_string())
+            }
+        };
+        let mut ctx = ToolContext::new(directory).with_settings_store(settings_store);
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }

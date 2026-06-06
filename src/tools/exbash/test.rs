@@ -222,6 +222,80 @@ async fn list_shells_returns_executor_settings() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn local_executor_uses_directory_settings_file() {
+    let one = tempdir().unwrap();
+    let two = tempdir().unwrap();
+    let one_settings = one.path().join(".re-setting.json");
+    let two_settings = two.path().join(".re-setting.json");
+    fs::write(&one_settings, shell_settings("one")).unwrap();
+    fs::write(&two_settings, shell_settings("two")).unwrap();
+
+    let executor = Executor::local("directory-settings");
+    let first = executor
+        .handle(ExecutorRequest {
+            id: json!("list-one"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(one.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(first.ok, "{:?}", first.error);
+    let first_text = first.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(first_text.starts_with("default:one\n"), "{first_text}");
+    assert!(
+        first_text.contains(&format!("settingsPath:{}", one_settings.to_string_lossy())),
+        "{first_text}"
+    );
+
+    let second = executor
+        .handle(ExecutorRequest {
+            id: json!("list-two"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: Some(two.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(second.ok, "{:?}", second.error);
+    let second_text = second.result.unwrap()["output"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(second_text.starts_with("default:two\n"), "{second_text}");
+    assert!(
+        second_text.contains(&format!("settingsPath:{}", two_settings.to_string_lossy())),
+        "{second_text}"
+    );
+
+    let set = executor
+        .handle(ExecutorRequest {
+            id: json!("set-one"),
+            method: "set_default_shell".to_string(),
+            params: json!({"shell":"two"}),
+            directory: Some(one.path().to_path_buf()),
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(set.ok, "{:?}", set.error);
+    assert!(fs::read_to_string(&one_settings)
+        .unwrap()
+        .contains("\"default\": \"two\""));
+    let second_settings = fs::read_to_string(&two_settings).unwrap();
+    assert!(
+        second_settings.contains("\"default\":\"two\"")
+            || second_settings.contains("\"default\": \"two\"")
+    );
+}
+
+#[cfg(unix)]
 fn shell_settings(default_shell: &str) -> String {
     json!({
         "version": 1,

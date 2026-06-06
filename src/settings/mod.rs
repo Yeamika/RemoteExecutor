@@ -112,6 +112,10 @@ impl SettingsStore {
         })
     }
 
+    pub fn load_for_directory(directory: &Path) -> Result<Self> {
+        Self::load(Some(directory.join(SETTINGS_FILE)))
+    }
+
     pub fn load_default_lossy() -> Self {
         Self::load(None).unwrap_or_else(|_| {
             let path = settings_path(None).unwrap_or_else(|_| PathBuf::from(SETTINGS_FILE));
