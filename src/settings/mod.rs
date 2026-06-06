@@ -3,7 +3,7 @@ mod shell;
 use anyhow::{anyhow, Context, Result};
 use pty_t_core::CommandSpec;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,8 @@ const COMMAND_PLACEHOLDER: &str = "{command}";
 pub struct SettingsStore {
     path: PathBuf,
     root: PathBuf,
+    base_path: Option<PathBuf>,
+    base_root: Option<PathBuf>,
     inner: Arc<Mutex<SettingsState>>,
 }
 
@@ -24,6 +26,7 @@ pub struct SettingsStore {
 struct SettingsState {
     settings: ReSettings,
     stamp: Option<FileStamp>,
+    base_stamp: Option<FileStamp>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,20 +103,41 @@ impl Default for ShellSettings {
 impl SettingsStore {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = settings_path(path)?;
+        Self::load_layered(None, path)
+    }
+
+    pub fn load_layered(base_path: Option<PathBuf>, path: PathBuf) -> Result<Self> {
+        let path = absolutize(path)?;
+        let base_path = base_path.map(absolutize).transpose()?;
+        let base_path = base_path.filter(|base| base != &path);
         let root = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let (settings, stamp) = load_settings_file(&path)?;
+        let base_root = base_path
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let (settings, base_stamp, stamp) = load_settings_layers(base_path.as_deref(), &path)?;
         Ok(Self {
             path,
             root,
-            inner: Arc::new(Mutex::new(SettingsState { settings, stamp })),
+            base_path,
+            base_root,
+            inner: Arc::new(Mutex::new(SettingsState {
+                settings,
+                stamp,
+                base_stamp,
+            })),
         })
     }
 
     pub fn load_for_directory(directory: &Path) -> Result<Self> {
-        Self::load(Some(directory.join(SETTINGS_FILE)))
+        Self::load_layered(Some(settings_path(None)?), directory.join(SETTINGS_FILE))
+    }
+
+    pub fn for_directory(&self, directory: &Path) -> Result<Self> {
+        let base_path = self.base_path.clone().unwrap_or_else(|| self.path.clone());
+        Self::load_layered(Some(base_path), directory.join(SETTINGS_FILE))
     }
 
     pub fn load_default_lossy() -> Self {
@@ -132,9 +156,12 @@ impl SettingsStore {
         Self {
             path,
             root,
+            base_path: None,
+            base_root: None,
             inner: Arc::new(Mutex::new(SettingsState {
                 settings: with_default_profiles(settings),
                 stamp: None,
+                base_stamp: None,
             })),
         }
     }
@@ -228,6 +255,11 @@ impl SettingsStore {
             if let Some(program) = resolve_program(candidate, &self.root) {
                 return Ok(program);
             }
+            if let Some(base_root) = &self.base_root {
+                if let Some(program) = resolve_program(candidate, base_root) {
+                    return Ok(program);
+                }
+            }
         }
         Err(anyhow!(
             "no candidate found for shell profile `{profile_name}`; checked: {}",
@@ -237,12 +269,20 @@ impl SettingsStore {
 
     fn reload_if_changed(&self) -> Result<()> {
         let current = file_stamp(&self.path)?;
+        let current_base = self
+            .base_path
+            .as_deref()
+            .map(file_stamp)
+            .transpose()?
+            .flatten();
         let mut state = self.inner.lock().unwrap();
-        if state.stamp == current {
+        if state.stamp == current && state.base_stamp == current_base {
             return Ok(());
         }
-        let (settings, stamp) = load_settings_file(&self.path)?;
+        let (settings, base_stamp, stamp) =
+            load_settings_layers(self.base_path.as_deref(), &self.path)?;
         state.settings = settings;
+        state.base_stamp = base_stamp;
         state.stamp = stamp;
         Ok(())
     }
@@ -337,15 +377,45 @@ fn display_args(args: &[String]) -> String {
         .join(" ")
 }
 
-fn load_settings_file(path: &Path) -> Result<(ReSettings, Option<FileStamp>)> {
+fn load_settings_layers(
+    base_path: Option<&Path>,
+    path: &Path,
+) -> Result<(ReSettings, Option<FileStamp>, Option<FileStamp>)> {
+    let mut value = serde_json::to_value(ReSettings::default())?;
+    let base_stamp = if let Some(base_path) = base_path {
+        let (base, stamp) = load_settings_value(base_path)?;
+        json_merge(&mut value, base);
+        stamp
+    } else {
+        None
+    };
+    let (overlay, stamp) = load_settings_value(path)?;
+    json_merge(&mut value, overlay);
+    let settings = serde_json::from_value::<ReSettings>(value)
+        .with_context(|| format!("failed to parse merged settings for {}", path.display()))?;
+    Ok((with_default_profiles(settings), base_stamp, stamp))
+}
+
+fn load_settings_value(path: &Path) -> Result<(Value, Option<FileStamp>)> {
     if !path.exists() {
-        return Ok((ReSettings::default(), None));
+        return Ok((json!({}), None));
     }
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read settings file {}", path.display()))?;
-    let settings = serde_json::from_slice::<ReSettings>(&bytes)
+    let value = serde_json::from_slice::<Value>(&bytes)
         .with_context(|| format!("failed to parse settings file {}", path.display()))?;
-    Ok((with_default_profiles(settings), file_stamp(path)?))
+    Ok((value, file_stamp(path)?))
+}
+
+fn json_merge(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                json_merge(base.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
 }
 
 fn write_settings_file(path: &Path, settings: &ReSettings) -> Result<Option<FileStamp>> {
@@ -359,7 +429,14 @@ fn write_settings_file(path: &Path, settings: &ReSettings) -> Result<Option<File
 }
 
 fn settings_path(path: Option<PathBuf>) -> Result<PathBuf> {
-    absolutize(path.unwrap_or_else(|| PathBuf::from(SETTINGS_FILE)))
+    absolutize(path.unwrap_or_else(default_settings_path))
+}
+
+fn default_settings_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(SETTINGS_FILE)))
+        .unwrap_or_else(|| PathBuf::from(SETTINGS_FILE))
 }
 
 fn absolutize(path: PathBuf) -> Result<PathBuf> {

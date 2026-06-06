@@ -68,7 +68,7 @@ impl Executor {
         let params = apply_soft_timeout_param(&method, request.params, request.tool_timeout_ms);
         let settings_store = match directory
             .as_deref()
-            .map(SettingsStore::load_for_directory)
+            .map(|directory| self.settings_store.for_directory(directory))
             .transpose()
         {
             Ok(Some(settings)) => settings,

@@ -296,6 +296,56 @@ async fn local_executor_uses_directory_settings_file() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn directory_settings_json_merge_over_base_settings() {
+    let base = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let base_settings = base.path().join(".re-setting.json");
+    let workspace_settings = workspace.path().join(".re-setting.json");
+    fs::write(&base_settings, shell_settings("one")).unwrap();
+    fs::write(
+        &workspace_settings,
+        json!({
+            "shells": {
+                "default": "two"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let settings =
+        SettingsStore::load_layered(Some(base_settings.clone()), workspace_settings.clone())
+            .unwrap();
+    let executor = Executor::local("layered-settings").with_settings_store(settings);
+    let response = executor
+        .handle(ExecutorRequest {
+            id: json!("layered-list"),
+            method: "list_shells".to_string(),
+            params: json!({}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    let output = result["output"]["text"].as_str().unwrap();
+    assert!(
+        output.starts_with("default:two\ninteractive:one\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("- one: candidates=sh commandArgs=-c echo one-marker; {command}"),
+        "{output}"
+    );
+    assert_eq!(
+        result["metadata"]["settingsPath"].as_str().unwrap(),
+        workspace_settings.to_string_lossy()
+    );
+}
+
+#[cfg(unix)]
 fn shell_settings(default_shell: &str) -> String {
     json!({
         "version": 1,
