@@ -1,3 +1,4 @@
+use super::soft_timeout::SoftTimeout;
 use anyhow::{anyhow, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use grep_matcher::Matcher;
@@ -26,6 +27,8 @@ pub struct RgOptions {
     pub case_sensitive: bool,
     #[serde(default)]
     pub max_count: Option<usize>,
+    #[serde(default)]
+    pub timeout: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,6 +37,10 @@ pub struct RgOutput {
     pub stdout: String,
     pub stderr: String,
     pub matches: usize,
+    #[serde(rename = "filesWalked")]
+    pub files_walked: usize,
+    #[serde(rename = "timedOut")]
+    pub timed_out: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,8 +70,9 @@ impl RgExecutor {
 }
 
 pub async fn rg_search(options: RgOptions) -> Result<RgOutput> {
-    let matches = rg_matches(options).await?;
-    let stdout = matches
+    let result = rg_search_result(options).await?;
+    let stdout = result
+        .matches
         .iter()
         .map(|hit| {
             format!(
@@ -75,26 +83,40 @@ pub async fn rg_search(options: RgOptions) -> Result<RgOutput> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(RgOutput {
-        code: if matches.is_empty() { 1 } else { 0 },
+        code: if result.matches.is_empty() { 1 } else { 0 },
         stdout: if stdout.is_empty() {
             stdout
         } else {
             format!("{stdout}\n")
         },
         stderr: String::new(),
-        matches: matches.len(),
+        matches: result.matches.len(),
+        files_walked: result.files_walked,
+        timed_out: result.timed_out,
     })
 }
 
 pub async fn rg_matches(options: RgOptions) -> Result<Vec<RgMatch>> {
+    Ok(rg_search_result(options).await?.matches)
+}
+
+async fn rg_search_result(options: RgOptions) -> Result<RgSearchResult> {
     tokio::task::spawn_blocking(move || search_sync(options)).await?
 }
 
-fn search_sync(options: RgOptions) -> Result<Vec<RgMatch>> {
+#[derive(Debug)]
+struct RgSearchResult {
+    matches: Vec<RgMatch>,
+    files_walked: usize,
+    timed_out: bool,
+}
+
+fn search_sync(options: RgOptions) -> Result<RgSearchResult> {
     if options.pattern.is_empty() {
         return Err(anyhow!("rg pattern must not be empty"));
     }
 
+    let mut deadline = SoftTimeout::from_millis(options.timeout)?;
     let root = options.root.unwrap_or(std::env::current_dir()?);
     let start = path_under(
         &root,
@@ -106,23 +128,32 @@ fn search_sync(options: RgOptions) -> Result<Vec<RgMatch>> {
     let globset = build_globset(&options.globs)?;
     let max_count = options.max_count.unwrap_or(usize::MAX);
     let mut matches = Vec::new();
+    let mut files_walked = 0usize;
 
-    for entry in walk_paths(&start) {
-        let path = entry?;
+    for entry in WalkBuilder::new(&start).hidden(false).build() {
+        if deadline.expired() {
+            break;
+        }
+        let path = entry?.into_path();
         if matches.len() >= max_count {
             break;
         }
         if !path.is_file() {
             continue;
         }
+        files_walked += 1;
         if !glob_matches(&root, &path, globset.as_ref()) {
             continue;
         }
 
-        let _ = search_file(&matcher, &path, &mut matches, max_count);
+        let _ = search_file(&matcher, &path, &mut matches, max_count, &mut deadline);
     }
 
-    Ok(matches)
+    Ok(RgSearchResult {
+        matches,
+        files_walked,
+        timed_out: deadline.timed_out(),
+    })
 }
 
 fn search_file(
@@ -130,7 +161,12 @@ fn search_file(
     path: &Path,
     matches: &mut Vec<RgMatch>,
     max_count: usize,
+    deadline: &mut SoftTimeout,
 ) -> Result<()> {
+    if deadline.expired() {
+        return Ok(());
+    }
+
     let mut searcher = SearcherBuilder::new().line_number(true).build();
     let path_text = path.to_string_lossy().into_owned();
     let mod_time = mtime_ms(path);
@@ -138,7 +174,7 @@ fn search_file(
         matcher,
         path,
         UTF8(|line_number, line| {
-            if matches.len() >= max_count {
+            if matches.len() >= max_count || deadline.expired() {
                 return Ok(false);
             }
             let column = matcher
@@ -154,7 +190,7 @@ fn search_file(
                 line: line.trim_end_matches('\n').to_string(),
                 mod_time,
             });
-            Ok(matches.len() < max_count)
+            Ok(matches.len() < max_count && !deadline.expired())
         }),
     )?;
     Ok(())
@@ -167,17 +203,6 @@ fn mtime_ms(path: &Path) -> u128 {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
-}
-
-fn walk_paths(start: &Path) -> Vec<Result<PathBuf, ignore::Error>> {
-    if start.is_file() {
-        return vec![Ok(start.to_path_buf())];
-    }
-    WalkBuilder::new(start)
-        .hidden(false)
-        .build()
-        .map(|entry| entry.map(|entry| entry.into_path()))
-        .collect::<Vec<_>>()
 }
 
 fn build_globset(globs: &[String]) -> Result<Option<GlobSet>> {
@@ -220,6 +245,7 @@ impl RgOptions {
             globs: Vec::new(),
             case_sensitive: true,
             max_count: None,
+            timeout: None,
         }
     }
 
@@ -245,6 +271,11 @@ impl RgOptions {
 
     pub fn max_count(mut self, max_count: usize) -> Self {
         self.max_count = Some(max_count);
+        self
+    }
+
+    pub fn timeout(mut self, timeout: i64) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 }

@@ -178,11 +178,23 @@ pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<R
         .session(async_id)
         .ok_or_else(|| anyhow!("Async run not found: {async_id}"))?;
     set_exit_code_label(async_id, "stopped");
-    session.kill()?;
-    let _ = manager
+    let kill_error = session.kill().err();
+    let wait_result = manager
         .core()
         .wait_exit_code_timeout(async_id, Duration::from_millis(500))
-        .await?;
+        .await;
+
+    if let Ok(detail) = manager.core().detail(async_id) {
+        if detail.exit_code.is_some() {
+            return Ok(run_detail_from_session(detail, None, None));
+        }
+    }
+
+    if let Some(error) = kill_error {
+        clear_exit_code_label(async_id);
+        return Err(error);
+    }
+    wait_result?;
     run_detail(manager, async_id, None, None)
 }
 

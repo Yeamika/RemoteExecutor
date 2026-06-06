@@ -5,6 +5,7 @@ mod stat;
 #[cfg(test)]
 mod test;
 
+use super::soft_timeout::SoftTimeout;
 use crate::{tool_output, tool_output_full, ToolContext, ToolResult};
 use anyhow::{anyhow, Context, Result};
 use globset::{Glob, GlobSetBuilder};
@@ -27,6 +28,8 @@ pub struct GlobOptions {
     pub pattern: String,
     #[serde(default)]
     pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub timeout: Option<i64>,
 }
 
 fn read_binary_file(
@@ -133,12 +136,18 @@ pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult>
     let globset = build_globset(&[options.pattern.clone()])?;
     let mut files = Vec::new();
     let mut truncated = false;
+    let mut deadline = SoftTimeout::from_millis(options.timeout)?;
+    let mut files_walked = 0usize;
 
     for entry in WalkBuilder::new(&search).hidden(false).build() {
+        if deadline.expired() {
+            break;
+        }
         let path = entry?.into_path();
         if !path.is_file() {
             continue;
         }
+        files_walked += 1;
         let relative = path.strip_prefix(&search).unwrap_or(&path);
         if !globset.is_match(relative) && !globset.is_match(&path) {
             continue;
@@ -170,7 +179,12 @@ pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult>
     }
 
     Ok(ToolResult {
-        metadata: json!({ "count": files.len(), "truncated": truncated }),
+        metadata: json!({
+            "count": files.len(),
+            "truncated": truncated,
+            "filesWalked": files_walked,
+            "timedOut": deadline.timed_out()
+        }),
         output: tool_output(output.join("\n")),
     })
 }

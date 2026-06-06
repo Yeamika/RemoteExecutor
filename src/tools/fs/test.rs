@@ -15,6 +15,7 @@ fn glob_paths_uses_pattern_matching() {
         GlobOptions {
             pattern: "*.rs".to_string(),
             path: Some(dir.path().to_path_buf()),
+            timeout: None,
         },
         &ctx,
     )

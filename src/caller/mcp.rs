@@ -311,6 +311,11 @@ fn tools() -> Vec<Value> {
                     prop("globs", "array"),
                     prop("case_sensitive", "boolean"),
                     prop("max_count", "number"),
+                    prop_desc(
+                        "timeout",
+                        "number",
+                        "Soft search timeout in milliseconds. Default 10000. Use -1 for no timeout.",
+                    ),
                 ],
             ),
             false,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn executor_applies_tool_timeout_to_small_tools() {
+async fn executor_maps_rg_tool_timeout_to_soft_timeout() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "content\n".repeat(500_000)).unwrap();
 
@@ -16,12 +16,13 @@ async fn executor_applies_tool_timeout_to_small_tools() {
             params: json!({"pattern":"needle", "root":dir.path().to_string_lossy()}),
             directory: Some(dir.path().to_path_buf()),
             executor: None,
-            tool_timeout_ms: Some(1),
+            tool_timeout_ms: Some(0),
         })
         .await;
 
-    assert!(!response.ok);
-    assert!(response.error.unwrap().contains("timed out"));
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.unwrap();
+    assert_eq!(result["metadata"]["timedOut"], json!(true));
 }
 
 #[tokio::test]

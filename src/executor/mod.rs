@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
@@ -64,17 +64,20 @@ impl Executor {
         let id = request.id.clone();
         let method = request.method.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
+        let params = apply_soft_timeout_param(&method, request.params, request.tool_timeout_ms);
         let mut ctx =
             ToolContext::new(request.directory).with_settings_store(self.settings_store.clone());
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }
         let result = if is_exbash_method(&method) {
-            dispatch_tool(&method, request.params, &ctx).await
+            dispatch_tool(&method, params, &ctx).await
+        } else if is_soft_timeout_method(&method) {
+            dispatch_tool(&method, params, &ctx).await
         } else {
             match timeout(
                 Duration::from_millis(timeout_ms),
-                dispatch_tool(&method, request.params, &ctx),
+                dispatch_tool(&method, params, &ctx),
             )
             .await
             {
@@ -190,6 +193,25 @@ fn is_exbash_method(method: &str) -> bool {
     method == "exbash"
 }
 
+fn is_soft_timeout_method(method: &str) -> bool {
+    matches!(method, "rg" | "glob")
+}
+
+fn apply_soft_timeout_param(method: &str, mut params: Value, requested: Option<u64>) -> Value {
+    if !is_soft_timeout_method(method) {
+        return params;
+    }
+    let Some(timeout_ms) = requested else {
+        return params;
+    };
+    if let Some(object) = params.as_object_mut() {
+        object
+            .entry("timeout")
+            .or_insert_with(|| Value::Number(Number::from(timeout_ms)));
+    }
+    params
+}
+
 pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Result<ToolResult> {
     match method {
         "exbash" => exbash(serde_json::from_value::<ExbashOptions>(params)?, ctx).await,
@@ -207,7 +229,12 @@ pub async fn dispatch_tool(method: &str, params: Value, ctx: &ToolContext) -> Re
         "rg" => {
             let output = rg_search(serde_json::from_value::<RgOptions>(params)?).await?;
             Ok(ToolResult {
-                metadata: serde_json::json!({ "matches": output.matches, "code": output.code }),
+                metadata: serde_json::json!({
+                    "matches": output.matches,
+                    "filesWalked": output.files_walked,
+                    "code": output.code,
+                    "timedOut": output.timed_out
+                }),
                 output: tool_output(output.stdout),
             })
         }

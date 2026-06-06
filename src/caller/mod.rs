@@ -362,19 +362,23 @@ pub async fn handle_request(request: StdioRequest) -> StdioResponse {
 async fn call_ws(
     url: &str,
     request: ExecutorRequest,
-    call_timeout_ms: u64,
+    call_timeout_ms: Option<u64>,
 ) -> Result<ExecutorResponse> {
     let request_id = request.id.clone();
-    match timeout(
-        Duration::from_millis(call_timeout_ms),
-        call_ws_inner(url, request),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(anyhow!(
-            "executor call timed out after {call_timeout_ms}ms for request {request_id}"
-        )),
+    if let Some(call_timeout_ms) = call_timeout_ms {
+        match timeout(
+            Duration::from_millis(call_timeout_ms),
+            call_ws_inner(url, request),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "executor call timed out after {call_timeout_ms}ms for request {request_id}"
+            )),
+        }
+    } else {
+        call_ws_inner(url, request).await
     }
 }
 
@@ -408,17 +412,28 @@ fn normalize_ws_url(url: &str) -> String {
     }
 }
 
-fn call_timeout_ms_for(request: &ExecutorRequest) -> u64 {
+fn call_timeout_ms_for(request: &ExecutorRequest) -> Option<u64> {
     if request.method == "exbash" {
         let read_timeout = request
             .params
             .get("read_timeout")
             .and_then(Value::as_u64)
             .unwrap_or(10_000);
-        return read_timeout.saturating_add(EXBASH_TIMEOUT_BUFFER_MS);
+        return Some(read_timeout.saturating_add(EXBASH_TIMEOUT_BUFFER_MS));
+    }
+    if matches!(request.method.as_str(), "rg" | "glob") {
+        let search_timeout = request
+            .params
+            .get("timeout")
+            .and_then(Value::as_i64)
+            .unwrap_or(10_000);
+        if search_timeout == -1 {
+            return None;
+        }
+        return Some((search_timeout.max(0) as u64).saturating_add(EXBASH_TIMEOUT_BUFFER_MS));
     }
 
-    DEFAULT_CALL_TIMEOUT_MS
+    Some(DEFAULT_CALL_TIMEOUT_MS)
 }
 
 fn is_list_executor(method: &str) -> bool {
