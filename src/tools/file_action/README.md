@@ -35,7 +35,7 @@ Modes:
 
 `patchMode` defaults to `text`. Use `binary` for byte-offset patches and binary create content.
 
-Text patches use current 1-based line instructions:
+Text patches use 1-based line instructions. Every line number in one `patchText` is interpreted against the file snapshot from the start of that patch:
 
 - `***DELETE*** start-end` deletes an inclusive line range.
 - `***MOVE*** start-end,startline` moves an inclusive line range after `startline`.

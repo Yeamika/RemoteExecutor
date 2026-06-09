@@ -140,6 +140,31 @@ enum LinePatchOp {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PendingLineInsertion {
+    boundary: usize,
+    order: usize,
+    kind: PendingLineInsertionKind,
+}
+
+#[derive(Clone, Debug)]
+enum PendingLineInsertionKind {
+    Literal(Vec<String>),
+    Move { start: usize, end: usize },
+}
+
+#[derive(Clone, Debug)]
+struct LineInsertion {
+    order: usize,
+    lines: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineRemoval {
+    Delete,
+    Move,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineInsertTarget {
     Start,
@@ -501,7 +526,7 @@ fn parse_line_insert_target(value: &str) -> Result<LineInsertTarget> {
 
 fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
     let had_final_newline = before_text.ends_with('\n');
-    let mut lines: Vec<String> = if before_text.is_empty() {
+    let lines: Vec<String> = if before_text.is_empty() {
         Vec::new()
     } else {
         before_text
@@ -509,11 +534,16 @@ fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
             .map(str::to_string)
             .collect()
     };
-    for op in ops {
+    let line_count = lines.len();
+    let mut removals = vec![None; line_count];
+    let mut replacements = vec![None; line_count];
+    let mut pending_insertions = Vec::new();
+
+    for (order, op) in ops.iter().enumerate() {
         match op {
             LinePatchOp::Delete { start, end } => {
                 ensure_line_range(&lines, *start, *end, "DELETE")?;
-                lines.drain(start - 1..*end);
+                mark_line_removal(&mut removals, *start, *end, LineRemoval::Delete)?;
             }
             LinePatchOp::Move { start, end, after } => {
                 ensure_line_range(&lines, *start, *end, "MOVE")?;
@@ -524,34 +554,118 @@ fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
                         after.label()
                     ));
                 }
-                let original_after = after.index(lines.len(), "MOVE target")?;
-                let moved: Vec<String> = lines.drain(start - 1..*end).collect();
-                let removed = end - start + 1;
-                let insert_after = if original_after > *end {
-                    original_after - removed
-                } else {
-                    original_after
-                };
-                lines.splice(insert_after..insert_after, moved);
+                let boundary = after.index(line_count, "MOVE target")?;
+                mark_line_removal(&mut removals, *start, *end, LineRemoval::Move)?;
+                pending_insertions.push(PendingLineInsertion {
+                    boundary,
+                    order,
+                    kind: PendingLineInsertionKind::Move {
+                        start: *start,
+                        end: *end,
+                    },
+                });
             }
             LinePatchOp::Append {
                 after,
                 lines: block,
             } => {
-                let insert_after = after.index(lines.len(), "APPEND_HEAD target")?;
-                lines.splice(insert_after..insert_after, block.clone());
+                let boundary = after.index(line_count, "APPEND_HEAD target")?;
+                pending_insertions.push(PendingLineInsertion {
+                    boundary,
+                    order,
+                    kind: PendingLineInsertionKind::Literal(block.clone()),
+                });
             }
             LinePatchOp::Replace { line, text } => {
                 ensure_line_range(&lines, *line, *line, "replace")?;
-                lines[line - 1] = text.clone();
+                let replacement = &mut replacements[line - 1];
+                if replacement.is_some() {
+                    return Err(anyhow!("replace line {line} is targeted more than once"));
+                }
+                *replacement = Some(text.clone());
             }
         }
     }
-    let mut out = lines.join("\n");
-    if had_final_newline || !lines.is_empty() {
+
+    for (idx, replacement) in replacements.iter().enumerate() {
+        if replacement.is_some() && removals[idx] == Some(LineRemoval::Delete) {
+            return Err(anyhow!("replace line {} overlaps deleted line", idx + 1));
+        }
+    }
+
+    let insertions = resolve_line_insertions(&lines, &replacements, pending_insertions);
+    let mut output_lines = Vec::new();
+    push_line_insertions(&mut output_lines, &insertions[0]);
+    for line_idx in 0..line_count {
+        if removals[line_idx].is_none() {
+            output_lines.push(line_text(&lines, &replacements, line_idx + 1));
+        }
+        push_line_insertions(&mut output_lines, &insertions[line_idx + 1]);
+    }
+
+    let mut out = output_lines.join("\n");
+    if had_final_newline || !output_lines.is_empty() {
         out.push('\n');
     }
     Ok(out)
+}
+
+fn mark_line_removal(
+    removals: &mut [Option<LineRemoval>],
+    start: usize,
+    end: usize,
+    removal: LineRemoval,
+) -> Result<()> {
+    for line in start..=end {
+        if let Some(existing) = removals[line - 1] {
+            return Err(anyhow!(
+                "{} line range {start}-{end} overlaps {} line {line}",
+                removal.label(),
+                existing.label()
+            ));
+        }
+    }
+    for line in start..=end {
+        removals[line - 1] = Some(removal);
+    }
+    Ok(())
+}
+
+fn resolve_line_insertions(
+    lines: &[String],
+    replacements: &[Option<String>],
+    pending_insertions: Vec<PendingLineInsertion>,
+) -> Vec<Vec<LineInsertion>> {
+    let mut insertions: Vec<Vec<LineInsertion>> = (0..=lines.len()).map(|_| Vec::new()).collect();
+    for pending in pending_insertions {
+        let lines = match pending.kind {
+            PendingLineInsertionKind::Literal(lines) => lines,
+            PendingLineInsertionKind::Move { start, end } => (start..=end)
+                .map(|line| line_text(lines, replacements, line))
+                .collect(),
+        };
+        insertions[pending.boundary].push(LineInsertion {
+            order: pending.order,
+            lines,
+        });
+    }
+    for boundary in &mut insertions {
+        boundary.sort_by_key(|insertion| insertion.order);
+    }
+    insertions
+}
+
+fn push_line_insertions(output_lines: &mut Vec<String>, insertions: &[LineInsertion]) {
+    for insertion in insertions {
+        output_lines.extend(insertion.lines.iter().cloned());
+    }
+}
+
+fn line_text(lines: &[String], replacements: &[Option<String>], line: usize) -> String {
+    replacements[line - 1]
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| lines[line - 1].clone())
 }
 
 impl LineInsertTarget {
@@ -575,6 +689,15 @@ impl LineInsertTarget {
             LineInsertTarget::Start => "0".to_string(),
             LineInsertTarget::End => "-1".to_string(),
             LineInsertTarget::After(line) => line.to_string(),
+        }
+    }
+}
+
+impl LineRemoval {
+    fn label(self) -> &'static str {
+        match self {
+            LineRemoval::Delete => "DELETE",
+            LineRemoval::Move => "MOVE",
         }
     }
 }

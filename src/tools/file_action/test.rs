@@ -26,19 +26,24 @@ fn patch_action(
 }
 
 async fn apply_text_patch(initial: &str, patch_text: &str) -> String {
+    apply_text_patch_with_diff(initial, patch_text).await.0
+}
+
+async fn apply_text_patch_with_diff(initial: &str, patch_text: &str) -> (String, String) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
     fs::write(&path, initial).unwrap();
     let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
 
-    file_action(
+    let result = file_action(
         patch_action(path.clone(), patch_text, PatchMode::Text, false, None),
         &ctx,
     )
     .await
     .unwrap();
 
-    fs::read_to_string(path).unwrap()
+    let diff = result.metadata["diff"].as_str().unwrap().to_string();
+    (fs::read_to_string(path).unwrap(), diff)
 }
 
 #[tokio::test]
@@ -119,11 +124,27 @@ async fn file_action_applies_delete_move_append_and_replace_line_patch() {
     )
     .await;
 
-    assert_eq!(out, "zero\none\nfour\nfive\nFIVE\n");
+    assert_eq!(out, "zero\none\nthree\nfour\nFIVE\n");
 }
 
 #[tokio::test]
-async fn file_action_applies_mixed_line_patch_operations_in_order() {
+async fn file_action_line_patch_instruction_numbers_use_original_snapshot() {
+    let (out, diff) = apply_text_patch_with_diff(
+        "one\ntwo\nthree\nfour\nfive\n",
+        "***DELETE*** 2-2\n3:THIRD_AFTER_DELETE\n",
+    )
+    .await;
+
+    assert_eq!(out, "one\nTHIRD_AFTER_DELETE\nfour\nfive\n");
+    assert!(
+        diff.contains("-two") && diff.contains("-three") && diff.contains("+THIRD_AFTER_DELETE"),
+        "{diff}"
+    );
+    assert!(!diff.contains("+three"), "{diff}");
+}
+
+#[tokio::test]
+async fn file_action_applies_mixed_line_patch_operations_from_original_snapshot() {
     let out = apply_text_patch(
         "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\n",
         concat!(
@@ -144,7 +165,7 @@ async fn file_action_applies_mixed_line_patch_operations_in_order() {
 
     assert_eq!(
         out,
-        "preamble\nalpha\ncharlie\ndelta\nINSERT-B\ninsert-a\ninsert-b\nfoxtrot\ngolf\n"
+        "preamble\nalpha\necho\nfoxtrot\nBRAVO\ninsert-a\ninsert-b\ncharlie\nINSERT-B\n"
     );
 }
 
