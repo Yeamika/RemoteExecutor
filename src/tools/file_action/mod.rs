@@ -128,16 +128,23 @@ enum LinePatchOp {
     Move {
         start: usize,
         end: usize,
-        after: usize,
+        after: LineInsertTarget,
     },
     Append {
-        after: usize,
+        after: LineInsertTarget,
         lines: Vec<String>,
     },
     Replace {
         line: usize,
         text: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineInsertTarget {
+    Start,
+    After(usize),
+    End,
 }
 
 pub async fn file_action(options: FileActionOptions, ctx: &ToolContext) -> Result<ToolResult> {
@@ -411,13 +418,13 @@ fn parse_line_patch(patch_text: &str) -> Result<Vec<LinePatchOp>> {
                 .ok_or_else(|| anyhow!("MOVE must be `***MOVE*** start-end,startline`"))?;
             let (start, end) = parse_line_range(range.trim())
                 .with_context(|| format!("invalid MOVE range: `{line}`"))?;
-            let after = parse_line_number(after.trim(), true)
+            let after = parse_line_insert_target(after.trim())
                 .with_context(|| format!("invalid MOVE target: `{line}`"))?;
             ops.push(LinePatchOp::Move { start, end, after });
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("***APPEND_HEAD***") {
-            let after = parse_line_number(rest.trim(), true)
+            let after = parse_line_insert_target(rest.trim())
                 .with_context(|| format!("invalid APPEND_HEAD target: `{line}`"))?;
             let mut block = Vec::new();
             let mut found_end = false;
@@ -480,6 +487,18 @@ fn parse_line_number(value: &str, allow_zero: bool) -> Result<usize> {
     Ok(number)
 }
 
+fn parse_line_insert_target(value: &str) -> Result<LineInsertTarget> {
+    if value == "-1" {
+        return Ok(LineInsertTarget::End);
+    }
+    let number = parse_line_number(value, true)?;
+    if number == 0 {
+        Ok(LineInsertTarget::Start)
+    } else {
+        Ok(LineInsertTarget::After(number))
+    }
+}
+
 fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
     let had_final_newline = before_text.ends_with('\n');
     let mut lines: Vec<String> = if before_text.is_empty() {
@@ -498,23 +517,20 @@ fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
             }
             LinePatchOp::Move { start, end, after } => {
                 ensure_line_range(&lines, *start, *end, "MOVE")?;
-                if (*start..=*end).contains(after) {
+                if matches!(after, LineInsertTarget::After(line) if (*start..=*end).contains(line))
+                {
                     return Err(anyhow!(
-                        "MOVE target line {after} is inside moved range {start}-{end}"
+                        "MOVE target line {} is inside moved range {start}-{end}",
+                        after.label()
                     ));
                 }
-                if *after > lines.len() {
-                    return Err(anyhow!(
-                        "MOVE target line {after} is out of range for {} line(s)",
-                        lines.len()
-                    ));
-                }
+                let original_after = after.index(lines.len(), "MOVE target")?;
                 let moved: Vec<String> = lines.drain(start - 1..*end).collect();
                 let removed = end - start + 1;
-                let insert_after = if *after > *end {
-                    after - removed
+                let insert_after = if original_after > *end {
+                    original_after - removed
                 } else {
-                    *after
+                    original_after
                 };
                 lines.splice(insert_after..insert_after, moved);
             }
@@ -522,13 +538,8 @@ fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
                 after,
                 lines: block,
             } => {
-                if *after > lines.len() {
-                    return Err(anyhow!(
-                        "APPEND_HEAD target line {after} is out of range for {} line(s)",
-                        lines.len()
-                    ));
-                }
-                lines.splice(*after..*after, block.clone());
+                let insert_after = after.index(lines.len(), "APPEND_HEAD target")?;
+                lines.splice(insert_after..insert_after, block.clone());
             }
             LinePatchOp::Replace { line, text } => {
                 ensure_line_range(&lines, *line, *line, "replace")?;
@@ -541,6 +552,31 @@ fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+impl LineInsertTarget {
+    fn index(self, line_count: usize, label: &str) -> Result<usize> {
+        match self {
+            LineInsertTarget::Start => Ok(0),
+            LineInsertTarget::End => Ok(line_count),
+            LineInsertTarget::After(line) => {
+                if line > line_count {
+                    return Err(anyhow!(
+                        "{label} line {line} is out of range for {line_count} line(s)"
+                    ));
+                }
+                Ok(line)
+            }
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            LineInsertTarget::Start => "0".to_string(),
+            LineInsertTarget::End => "-1".to_string(),
+            LineInsertTarget::After(line) => line.to_string(),
+        }
+    }
 }
 
 fn ensure_line_range(lines: &[String], start: usize, end: usize, label: &str) -> Result<()> {

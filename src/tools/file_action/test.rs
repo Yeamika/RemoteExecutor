@@ -149,6 +149,22 @@ async fn file_action_applies_mixed_line_patch_operations_in_order() {
 }
 
 #[tokio::test]
+async fn file_action_supports_minus_one_line_insert_targets() {
+    let out = apply_text_patch(
+        "one\ntwo\nthree\nfour\n",
+        concat!(
+            "***MOVE*** 1-1,-1\n",
+            "***APPEND_HEAD*** -1\n",
+            "tail\n",
+            "***APPEND_END***\n",
+        ),
+    )
+    .await;
+
+    assert_eq!(out, "two\nthree\nfour\none\ntail\n");
+}
+
+#[tokio::test]
 async fn file_action_patch_result_does_not_return_full_file_contents() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");

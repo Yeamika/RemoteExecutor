@@ -39,7 +39,8 @@ Text patches use current 1-based line instructions:
 
 - `***DELETE*** start-end` deletes an inclusive line range.
 - `***MOVE*** start-end,startline` moves an inclusive line range after `startline`.
-- `***APPEND_HEAD*** startline` starts a literal append block inserted after `startline`; close it with `***APPEND_END***`. Use `startline` 0 to insert at the start.
+- `***APPEND_HEAD*** startline` starts a literal append block inserted after `startline`; close it with `***APPEND_END***`.
+- Use `startline` 0 to insert at the start and `-1` to append at the end.
 - `n:new text` replaces line `n` with `new text`.
 
 Captured text patch request:
