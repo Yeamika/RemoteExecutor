@@ -13,6 +13,7 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -133,7 +134,7 @@ pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult>
         .as_ref()
         .map(|path| ctx.resolve(path))
         .unwrap_or_else(|| ctx.directory.clone());
-    let globset = build_globset(&[options.pattern.clone()])?;
+    let globset = build_globset(std::slice::from_ref(&options.pattern))?;
     let mut files = Vec::new();
     let mut truncated = false;
     let mut deadline = SoftTimeout::from_millis(options.timeout)?;
@@ -160,7 +161,7 @@ pub fn glob_paths(options: GlobOptions, ctx: &ToolContext) -> Result<ToolResult>
         files.push((path, mtime));
     }
 
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|file| Reverse(file.1));
     let mut output = Vec::new();
     if files.is_empty() {
         output.push("No files found".to_string());

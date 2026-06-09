@@ -9,6 +9,21 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
+type WsWrite =
+    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
+type WsRead = futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>;
+
+struct TerminalClient {
+    manager: ShellManager,
+    ws_write: WsWrite,
+    ws_read: WsRead,
+    peer_addr: SocketAddr,
+    id: String,
+    pty: String,
+    cols: u16,
+    rows: u16,
+}
+
 pub fn start_listener(addr: String, manager: ShellManager) -> Result<String> {
     let std_listener =
         std::net::TcpListener::bind(&addr).with_context(|| format!("bind {addr}"))?;
@@ -25,11 +40,8 @@ pub fn start_listener(addr: String, manager: ShellManager) -> Result<String> {
 
 pub async fn handle_first_text(
     first_text: String,
-    mut ws_write: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<TcpStream>,
-        Message,
-    >,
-    ws_read: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>,
+    mut ws_write: WsWrite,
+    ws_read: WsRead,
     peer_addr: SocketAddr,
     manager: ShellManager,
 ) -> Result<()> {
@@ -56,7 +68,17 @@ pub async fn handle_first_text(
         return Ok(());
     };
 
-    handle_terminal_client(manager, ws_write, ws_read, peer_addr, id, pty, cols, rows).await
+    handle_terminal_client(TerminalClient {
+        manager,
+        ws_write,
+        ws_read,
+        peer_addr,
+        id,
+        pty,
+        cols,
+        rows,
+    })
+    .await
 }
 
 async fn accept_loop(listener: TcpListener, manager: ShellManager) {
@@ -100,19 +122,17 @@ async fn handle_connection(
     .await
 }
 
-async fn handle_terminal_client(
-    manager: ShellManager,
-    ws_write: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<TcpStream>,
-        Message,
-    >,
-    mut ws_read: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>,
-    peer_addr: SocketAddr,
-    id: String,
-    pty: String,
-    cols: u16,
-    rows: u16,
-) -> Result<()> {
+async fn handle_terminal_client(client: TerminalClient) -> Result<()> {
+    let TerminalClient {
+        manager,
+        ws_write,
+        mut ws_read,
+        peer_addr,
+        id,
+        pty,
+        cols,
+        rows,
+    } = client;
     let Some(session) = manager.core().session(&pty) else {
         return Err(anyhow!("pty {pty} does not exist"));
     };
@@ -229,13 +249,7 @@ async fn handle_client_message(
     }
 }
 
-async fn send_response(
-    ws_write: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<TcpStream>,
-        Message,
-    >,
-    response: Result<ServerText>,
-) -> Result<()> {
+async fn send_response(ws_write: &mut WsWrite, response: Result<ServerText>) -> Result<()> {
     let msg = match response {
         Ok(msg) => msg,
         Err(err) => ServerText::Error {

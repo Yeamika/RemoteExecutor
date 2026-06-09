@@ -88,14 +88,9 @@ where
 }
 
 pub async fn handle_mcp_message(caller: &Caller, message: Value) -> Option<Value> {
-    let id = message.get("id").cloned();
+    let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
 
-    if id.is_none() {
-        return None;
-    }
-
-    let id = id.unwrap_or(Value::Null);
     match method {
         "initialize" => Some(success_response(id, initialize_result())),
         "ping" => Some(success_response(id, json!({}))),

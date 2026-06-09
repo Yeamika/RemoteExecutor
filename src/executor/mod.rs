@@ -91,9 +91,7 @@ impl Executor {
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }
-        let result = if is_exbash_method(&method) {
-            dispatch_tool(&method, params, &ctx).await
-        } else if is_soft_timeout_method(&method) {
+        let result = if is_exbash_method(&method) || is_soft_timeout_method(&method) {
             dispatch_tool(&method, params, &ctx).await
         } else {
             match timeout(

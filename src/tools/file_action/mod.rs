@@ -818,8 +818,8 @@ fn restore_line_endings(text: &str, line_ending: &str) -> String {
 }
 
 fn patch_file(ctx: &ToolContext, path: &Path, diff: &str) -> PatchFile {
-    let additions = count_diff_lines(&diff, '+');
-    let deletions = count_diff_lines(&diff, '-');
+    let additions = count_diff_lines(diff, '+');
+    let deletions = count_diff_lines(diff, '-');
     PatchFile {
         file_path: path.to_string_lossy().into_owned(),
         relative_path: ctx.title(path),

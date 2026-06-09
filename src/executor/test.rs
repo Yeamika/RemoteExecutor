@@ -203,9 +203,7 @@ async fn shared_endpoint_meta_reports_pty_exit_code() {
 
     let exit_code = timeout(Duration::from_secs(2), async {
         loop {
-            let Some(message) = pty_ws.next().await else {
-                return None;
-            };
+            let message = pty_ws.next().await?;
             let Ok(Message::Text(text)) = message else {
                 continue;
             };

@@ -182,9 +182,7 @@ fn clipped_list_command(command: &str) -> String {
 }
 
 fn single_line_list_text(text: &str) -> String {
-    text.replace("\r\n", "\\n")
-        .replace('\n', "\\n")
-        .replace('\r', "\\n")
+    text.replace("\r\n", "\\n").replace(['\n', '\r'], "\\n")
 }
 
 pub(crate) async fn stop_run(manager: &ShellManager, async_id: &str) -> Result<RunDetail> {
