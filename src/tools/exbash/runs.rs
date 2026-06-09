@@ -348,13 +348,7 @@ fn validate_input_bytes(name: &str, len: usize) -> Result<()> {
 }
 
 pub(crate) fn description(options: &ExbashOptions) -> String {
-    options.description.clone().unwrap_or_else(|| {
-        options
-            .command
-            .clone()
-            .or_else(|| options.mode.clone())
-            .unwrap_or_else(|| "exbash".to_string())
-    })
+    options.description.clone().unwrap_or_default()
 }
 
 pub(crate) fn clip(text: &str) -> String {
@@ -395,7 +389,7 @@ fn run_detail_from_session(
         exit_code,
         total_output: detail.output_history_bytes,
         command: command.clone(),
-        description: description_override.unwrap_or(command),
+        description: description_override.unwrap_or_default(),
         cwd: detail.cwd.unwrap_or_default(),
         timeout,
         started_at: u128::from(detail.created_at),

@@ -32,6 +32,27 @@ fn exbash_list_formats_description_and_clipped_command() {
     assert!(!text.contains("description=full description\nwith newline"));
 }
 
+#[test]
+fn exbash_missing_description_stays_empty() {
+    let text = format_run_details(&[RunDetail {
+        async_id: "rex-empty".to_string(),
+        pid: None,
+        state: "running".to_string(),
+        exit_code: None,
+        total_output: 0,
+        command: "echo should-not-be-description".to_string(),
+        description: String::new(),
+        cwd: "/tmp".to_string(),
+        timeout: None,
+        started_at: 1,
+        ended_at: None,
+        error: None,
+    }]);
+
+    assert!(text.contains("description= command=echo should-not-be-description"));
+    assert!(!text.contains("description=echo should-not-be-description"));
+}
+
 #[tokio::test]
 async fn executor_maps_rg_tool_timeout_to_soft_timeout() {
     let dir = tempdir().unwrap();
