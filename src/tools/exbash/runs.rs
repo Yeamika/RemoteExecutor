@@ -13,6 +13,7 @@ use tokio::time;
 
 const OUTPUT_LIMIT: usize = 30_000;
 const EXBASH_PREFIX: &str = "rex-";
+const TMP_RUNNING_DESCRIPTION: &str = "Tmp Running";
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RunDetail {
@@ -47,6 +48,8 @@ pub(crate) struct StartedJob {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static EXIT_CODE_LABELS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static DESCRIPTION_LABELS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn manager(ctx: &ToolContext) -> Result<ShellManager> {
     ctx.shell_manager()
@@ -78,11 +81,13 @@ pub(crate) async fn start_job(options: &ExbashOptions, ctx: &ToolContext) -> Res
     if let Some(timeout) = timeout_ms {
         spawn_timeout(manager.clone(), id.clone(), timeout);
     }
+    let description = description(options);
+    set_description_label(&id, &description);
 
     Ok(StartedJob {
         manager,
         async_id: id,
-        description: description(options),
+        description,
         timeout: options.timeout,
         output,
     })
@@ -242,11 +247,16 @@ pub(crate) async fn remove_run(
     }
     manager.remove_pty(async_id);
     clear_exit_code_label(async_id);
+    clear_description_label(async_id);
     Ok(value)
 }
 
 pub(crate) fn clear_exit_code_label(async_id: &str) {
     EXIT_CODE_LABELS.lock().unwrap().remove(async_id);
+}
+
+pub(crate) fn clear_description_label(async_id: &str) {
+    DESCRIPTION_LABELS.lock().unwrap().remove(async_id);
 }
 
 pub(crate) fn exit_code_display(async_id: &str, code: u32) -> String {
@@ -346,7 +356,11 @@ fn validate_input_bytes(name: &str, len: usize) -> Result<()> {
 }
 
 pub(crate) fn description(options: &ExbashOptions) -> String {
-    options.description.clone().unwrap_or_default()
+    options
+        .description
+        .clone()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or_else(|| TMP_RUNNING_DESCRIPTION.to_string())
 }
 
 pub(crate) fn clip(text: &str) -> String {
@@ -370,9 +384,10 @@ fn run_detail_from_session(
     description_override: Option<String>,
     timeout: Option<i64>,
 ) -> RunDetail {
+    let async_id = detail.pty;
     let command = detail.command.join(" ");
     let raw_exit_code = detail.exit_code;
-    let exit_code = exit_code_json(&detail.pty, raw_exit_code);
+    let exit_code = exit_code_json(&async_id, raw_exit_code);
     let state = if exit_code.is_some() {
         "stopped"
     } else {
@@ -380,14 +395,17 @@ fn run_detail_from_session(
     }
     .to_string();
     let ended_at = exit_code.as_ref().map(|_| now_ms());
+    let description = description_override
+        .or_else(|| description_label(&async_id))
+        .unwrap_or_else(|| TMP_RUNNING_DESCRIPTION.to_string());
     RunDetail {
-        async_id: detail.pty,
+        async_id,
         pid: detail.process_id,
         state,
         exit_code,
         total_output: detail.output_history_bytes,
         command: command.clone(),
-        description: description_override.unwrap_or_default(),
+        description,
         cwd: detail.cwd.unwrap_or_default(),
         timeout,
         started_at: u128::from(detail.created_at),
@@ -400,6 +418,10 @@ fn exit_code_label(async_id: &str) -> Option<String> {
     EXIT_CODE_LABELS.lock().unwrap().get(async_id).cloned()
 }
 
+fn description_label(async_id: &str) -> Option<String> {
+    DESCRIPTION_LABELS.lock().unwrap().get(async_id).cloned()
+}
+
 fn exit_code_value_text(value: &Value) -> String {
     value
         .as_str()
@@ -409,6 +431,13 @@ fn exit_code_value_text(value: &Value) -> String {
 
 fn set_exit_code_label(async_id: &str, label: &str) {
     EXIT_CODE_LABELS
+        .lock()
+        .unwrap()
+        .insert(async_id.to_string(), label.to_string());
+}
+
+fn set_description_label(async_id: &str, label: &str) {
+    DESCRIPTION_LABELS
         .lock()
         .unwrap()
         .insert(async_id.to_string(), label.to_string());

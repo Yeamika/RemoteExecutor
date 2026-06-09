@@ -33,7 +33,7 @@ fn exbash_list_formats_description_and_clipped_command() {
 }
 
 #[test]
-fn exbash_missing_description_stays_empty() {
+fn exbash_missing_description_uses_tmp_running() {
     let text = format_run_details(&[RunDetail {
         async_id: "rex-empty".to_string(),
         pid: None,
@@ -41,7 +41,7 @@ fn exbash_missing_description_stays_empty() {
         exit_code: None,
         total_output: 0,
         command: "echo should-not-be-description".to_string(),
-        description: String::new(),
+        description: "Tmp Running".to_string(),
         cwd: "/tmp".to_string(),
         timeout: None,
         started_at: 1,
@@ -49,7 +49,7 @@ fn exbash_missing_description_stays_empty() {
         error: None,
     }]);
 
-    assert!(text.contains("description= command=echo should-not-be-description"));
+    assert!(text.contains("description=Tmp Running command=echo should-not-be-description"));
     assert!(!text.contains("description=echo should-not-be-description"));
 }
 
@@ -873,6 +873,60 @@ async fn exbash_detach_returns_current_snapshot() {
     let _ = executor
         .handle(ExecutorRequest {
             id: json!(23),
+            method: "exbash".to_string(),
+            params: json!({"mode":"remove","asyncID":async_id}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn exbash_detach_without_description_uses_tmp_running() {
+    let executor = Executor::local("tmp-running-description");
+    let command = if cfg!(windows) {
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 5'"
+    } else {
+        "sleep 5"
+    };
+
+    let start = executor
+        .handle(ExecutorRequest {
+            id: json!("tmp-running-start"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"run",
+                "command": command,
+                "read_timeout":0
+            }),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+
+    assert!(start.ok, "{:?}", start.error);
+    let result = start.result.unwrap();
+    let async_id = result["metadata"]["asyncID"].as_str().unwrap().to_string();
+    assert_eq!(result["metadata"]["description"], json!("Tmp Running"));
+
+    let list = executor
+        .handle(ExecutorRequest {
+            id: json!("tmp-running-list"),
+            method: "exbash".to_string(),
+            params: json!({"mode":"list","asyncID":async_id.clone()}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(list.ok, "{:?}", list.error);
+    let text = list.result.unwrap().to_string();
+    assert!(text.contains("description=Tmp Running"), "{text}");
+
+    let _ = executor
+        .handle(ExecutorRequest {
+            id: json!("tmp-running-remove"),
             method: "exbash".to_string(),
             params: json!({"mode":"remove","asyncID":async_id}),
             directory: None,

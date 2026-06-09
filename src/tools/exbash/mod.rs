@@ -10,9 +10,9 @@ mod test;
 use crate::{tool_output, tool_output_full, ToolContext, ToolResult};
 use anyhow::{anyhow, Result};
 use runs::{
-    attach, clear_exit_code_label, clip, exit_code_display, exit_code_json, format_run_details,
-    input_data, list_run_details, manager, merge_json, remove_run, run_detail, start_job, stop_run,
-    wait_for_stop_with_output,
+    attach, clear_description_label, clear_exit_code_label, clip, exit_code_display,
+    exit_code_json, format_run_details, input_data, list_run_details, manager, merge_json,
+    remove_run, run_detail, start_job, stop_run, wait_for_stop_with_output,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -155,11 +155,13 @@ async fn run_command(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolRe
     if let Some((detail, output)) = wait_for_stop_with_output(&mut job, read_timeout).await? {
         job.manager.remove_pty(&job.async_id);
         clear_exit_code_label(&job.async_id);
+        clear_description_label(&job.async_id);
         return Ok(ToolResult {
             metadata: json!({
                 "output": clip(&output),
                 "exitCode": detail.exit_code,
                 "command": detail.command,
+                "description": detail.description,
                 "cwd": detail.cwd,
                 "totalOutput": detail.total_output,
             }),
