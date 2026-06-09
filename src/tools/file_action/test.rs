@@ -42,7 +42,7 @@ async fn apply_text_patch(initial: &str, patch_text: &str) -> String {
 }
 
 #[tokio::test]
-async fn file_action_rejects_non_patch_text_without_writing() {
+async fn file_action_rejects_unrecognized_line_patch_without_writing() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
     fs::write(&path, "base\n").unwrap();
@@ -51,7 +51,7 @@ async fn file_action_rejects_non_patch_text_without_writing() {
     let result = file_action(
         patch_action(
             path.clone(),
-            "this is not a unified diff",
+            "this is not a line patch",
             PatchMode::Text,
             false,
             None,
@@ -60,12 +60,12 @@ async fn file_action_rejects_non_patch_text_without_writing() {
     )
     .await;
 
-    assert!(result.is_err(), "plain text patch should fail");
+    assert!(result.is_err(), "unrecognized line patch should fail");
     assert_eq!(fs::read_to_string(path).unwrap(), "base\n");
 }
 
 #[tokio::test]
-async fn file_action_applies_unified_diff_patch_with_hash_check() {
+async fn file_action_applies_line_patch_with_hash_check_and_diff_metadata() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
     fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -86,7 +86,7 @@ async fn file_action_applies_unified_diff_patch_with_hash_check() {
     let result = file_action(
         patch_action(
             path.clone(),
-            "@@ -1,3 +1,4 @@\n one\n-two\n+TWO\n three\n+four\n",
+            "2:TWO\n***APPEND_HEAD*** 3\nfour\n***APPEND_END***\n",
             PatchMode::Text,
             true,
             Some(hash_code),
@@ -103,8 +103,49 @@ async fn file_action_applies_unified_diff_patch_with_hash_check() {
     let new_hash = result.metadata["hashCode"].as_str().unwrap();
     assert!(new_hash.starts_with("sha256:"));
     assert!(result.output["text"].as_str().unwrap().contains(new_hash));
+    let diff = result.metadata["diff"].as_str().unwrap();
+    assert!(diff.contains("-two"));
+    assert!(diff.contains("+TWO"));
+    assert!(diff.contains("+four"));
     assert!(result.metadata["file"].get("before").is_none());
     assert!(result.metadata["file"].get("after").is_none());
+}
+
+#[tokio::test]
+async fn file_action_applies_delete_move_append_and_replace_line_patch() {
+    let out = apply_text_patch(
+        "one\ntwo\nthree\nfour\nfive\n",
+        "***DELETE*** 2-2\n***MOVE*** 3-4,1\n***APPEND_HEAD*** 0\nzero\n***APPEND_END***\n5:FIVE\n",
+    )
+    .await;
+
+    assert_eq!(out, "zero\none\nfour\nfive\nFIVE\n");
+}
+
+#[tokio::test]
+async fn file_action_applies_mixed_line_patch_operations_in_order() {
+    let out = apply_text_patch(
+        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\n",
+        concat!(
+            "2:BRAVO\n",
+            "***APPEND_HEAD*** 2\n",
+            "insert-a\n",
+            "insert-b\n",
+            "***APPEND_END***\n",
+            "***MOVE*** 5-6,1\n",
+            "***DELETE*** 7-7\n",
+            "4:INSERT-B\n",
+            "***APPEND_HEAD*** 0\n",
+            "preamble\n",
+            "***APPEND_END***\n",
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        out,
+        "preamble\nalpha\ncharlie\ndelta\nINSERT-B\ninsert-a\ninsert-b\nfoxtrot\ngolf\n"
+    );
 }
 
 #[tokio::test]
@@ -122,13 +163,7 @@ async fn file_action_patch_result_does_not_return_full_file_contents() {
     let ctx = ToolContext::new(Some(dir.path().to_path_buf()));
 
     let result = file_action(
-        patch_action(
-            path,
-            "@@ -1 +1 @@\n-one\n+ONE\n",
-            PatchMode::Text,
-            false,
-            None,
-        ),
+        patch_action(path, "1:ONE\n", PatchMode::Text, false, None),
         &ctx,
     )
     .await
@@ -221,7 +256,7 @@ async fn file_action_rejects_stale_hash_without_writing() {
     let err = file_action(
         patch_action(
             path.clone(),
-            "@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n",
+            "2:TWO\n",
             PatchMode::Text,
             true,
             Some(format!("sha256:{}", "0".repeat(64))),
@@ -385,21 +420,7 @@ async fn file_action_renames_file_with_hash_check() {
 }
 
 #[tokio::test]
-async fn file_action_applies_unified_diff_patch_with_diffy() {
-    let output = apply_text_patch(
-        "hello\nworld\n",
-        "--- file.txt\n+++ file.txt\n@@ -1,2 +1,2 @@\n-hello\n+HELLO\n world\n",
-    )
-    .await;
-    assert_eq!(output, "HELLO\nworld\n");
-}
-
-#[tokio::test]
-async fn file_action_applies_hunk_only_unified_diff_patch() {
-    let output = apply_text_patch(
-        "hello\nworld\n",
-        "@@ -1,2 +1,2 @@\n-hello\n+HELLO\n world\n",
-    )
-    .await;
+async fn file_action_replaces_line_with_line_patch() {
+    let output = apply_text_patch("hello\nworld\n", "1:HELLO\n").await;
     assert_eq!(output, "HELLO\nworld\n");
 }

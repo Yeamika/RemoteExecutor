@@ -14,7 +14,7 @@ Request shape:
     "mode": "patch",
     "filePath": "src/foo.rs",
     "newFilePath": "src/bar.rs",
-    "patchText": "@@ -1 +1 @@\n-old\n+new\n",
+    "patchText": "1:new\n",
     "content": "new file content",
     "patchMode": "text",
     "hashCheckMode": false,
@@ -35,7 +35,12 @@ Modes:
 
 `patchMode` defaults to `text`. Use `binary` for byte-offset patches and binary create content.
 
-Text patches use unified diff and are applied through `diffy::Patch::from_str` and `diffy::apply`. If `patchText` starts with `@@`, FileAction adds internal file headers before passing it to `diffy`, so callers do not need to include `---` and `+++` lines.
+Text patches use current 1-based line instructions:
+
+- `***DELETE*** start-end` deletes an inclusive line range.
+- `***MOVE*** start-end,startline` moves an inclusive line range after `startline`.
+- `***APPEND_HEAD*** startline` starts a literal append block inserted after `startline`; close it with `***APPEND_END***`. Use `startline` 0 to insert at the start.
+- `n:new text` replaces line `n` with `new text`.
 
 Captured text patch request:
 
@@ -47,7 +52,7 @@ Captured text patch request:
     "mode": "patch",
     "filePath": "created.txt",
     "patchMode": "text",
-    "patchText": "@@ -1 +1 @@\n-hello\n+HELLO\n",
+    "patchText": "1:HELLO\n",
     "hashCheckMode": true,
     "hashCode": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
   },
@@ -103,7 +108,7 @@ Patch request:
     "mode": "patch",
     "filePath": "created.txt",
     "patchMode": "text",
-    "patchText": "@@ -1 +1 @@\n-hello\n+HELLO\n",
+    "patchText": "1:HELLO\n",
     "hashCheckMode": true,
     "hashCode": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
   },

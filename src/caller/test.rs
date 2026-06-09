@@ -223,7 +223,7 @@ async fn caller_routes_remote_executor_across_multiple_directories() {
             params: json!({
                 "mode":"patch",
                 "filePath":"same.txt",
-                "patchText":"@@ -1 +1 @@\n-beta\n+BETA\n"
+                "patchText":"1:BETA\n"
             }),
             directory: Some(beta.clone()),
             executor: Some("remote-folders".to_string()),

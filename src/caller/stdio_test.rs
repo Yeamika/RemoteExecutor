@@ -31,7 +31,7 @@ async fn stdio_dispatches_file_action_patch() {
         params: json!({
             "mode":"patch",
             "filePath":"file.txt",
-            "patchText":"@@ -1 +1 @@\n-before\n+after\n"
+            "patchText":"1:after\n"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,
@@ -56,7 +56,7 @@ async fn stdio_rejects_old_apply_patch_tool_name() {
         method: "apply_patch".to_string(),
         params: json!({
             "filePath":"file.txt",
-            "patchText":"@@ -1 +1 @@\n-before\n+after\n"
+            "patchText":"1:after\n"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,
@@ -85,7 +85,7 @@ async fn executor_file_action_result_omits_full_file_contents() {
             params: json!({
                 "mode":"patch",
                 "filePath":"file.txt",
-                "patchText":"@@ -1 +1 @@\n-one\n+ONE\n"
+                "patchText":"1:ONE\n"
             }),
             directory: Some(dir.path().to_path_buf()),
             executor: None,
@@ -110,7 +110,7 @@ async fn caller_file_action_result_omits_full_file_contents() {
         params: json!({
             "mode":"patch",
             "filePath":"file.txt",
-            "patchText":"@@ -1 +1 @@\n-one\n+ONE\n"
+            "patchText":"1:ONE\n"
         }),
         directory: Some(dir.path().to_path_buf()),
         executor: None,

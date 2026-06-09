@@ -401,8 +401,8 @@ async fn standalone_executor_resolves_shell_candidate_from_workdir_then_base() {
             directory: Some(workspace.path().to_path_buf()),
             executor: None,
             tool_timeout_ms: None,
-    })
-    .await;
+        })
+        .await;
     assert!(response.ok, "{:?}", response.error);
     let result = response.result.unwrap();
     assert!(result.to_string().contains("standalone-workdir-zbash"));
@@ -440,11 +440,13 @@ async fn local_executor_resolves_shell_candidate_from_workdir_workspace_then_bas
             directory: Some(workspace.path().to_path_buf()),
             executor: None,
             tool_timeout_ms: None,
-    })
-    .await;
+        })
+        .await;
     assert!(workspace_hit.ok, "{:?}", workspace_hit.error);
     let workspace_result = workspace_hit.result.unwrap();
-    assert!(workspace_result.to_string().contains("local-workspace-zbash"));
+    assert!(workspace_result
+        .to_string()
+        .contains("local-workspace-zbash"));
     assert!(workspace_result["metadata"]["command"]
         .as_str()
         .unwrap()
@@ -464,8 +466,8 @@ async fn local_executor_resolves_shell_candidate_from_workdir_workspace_then_bas
             directory: Some(workspace.path().to_path_buf()),
             executor: None,
             tool_timeout_ms: None,
-    })
-    .await;
+        })
+        .await;
     assert!(base_hit.ok, "{:?}", base_hit.error);
     let base_result = base_hit.result.unwrap();
     assert!(base_result.to_string().contains("local-base-zbash"));

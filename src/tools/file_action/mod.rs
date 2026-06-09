@@ -7,7 +7,7 @@ mod text_patch;
 
 use crate::{hash_bytes, tool_output, ToolContext, ToolResult};
 use anyhow::{anyhow, Context, Result};
-use diffy::{apply as diffy_apply, create_patch as diffy_create_patch, Patch as DiffyPatch};
+use diffy::create_patch as diffy_create_patch;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -119,6 +119,27 @@ struct BinaryOperation {
     order: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinePatchOp {
+    Delete {
+        start: usize,
+        end: usize,
+    },
+    Move {
+        start: usize,
+        end: usize,
+        after: usize,
+    },
+    Append {
+        after: usize,
+        lines: Vec<String>,
+    },
+    Replace {
+        line: usize,
+        text: String,
+    },
+}
+
 pub async fn file_action(options: FileActionOptions, ctx: &ToolContext) -> Result<ToolResult> {
     let target = ctx.resolve(&options.file_path);
     match options.mode {
@@ -226,16 +247,18 @@ async fn apply_text_patch(
     options: &FileActionOptions,
 ) -> Result<ToolResult> {
     let shape = TextShape::from_bytes(before_bytes)?;
-    let after_text = apply_diffy_text_patch(&shape.text, patch_text)?;
+    let after_text = apply_line_text_patch(&shape.text, patch_text)?;
     let after_bytes = shape.encode(&after_text);
     fs::write(target, &after_bytes)
         .with_context(|| format!("failed to write patch target {}", target.display()))?;
 
     let after_hash = hash_bytes(&after_bytes);
-    let file = patch_file(ctx, target, &shape.text, &after_text);
-    Ok(result_from_file(
+    let diff = diff_text(target, &shape.text, &after_text);
+    let file = patch_file(ctx, target, &diff);
+    Ok(result_from_file_with_diff(
         file,
         options.hash_check_mode.then_some(after_hash),
+        Some(diff),
     ))
 }
 
@@ -291,6 +314,14 @@ impl TextShape {
 }
 
 fn result_from_file(file: PatchFile, hash_code: Option<String>) -> ToolResult {
+    result_from_file_with_diff(file, hash_code, None)
+}
+
+fn result_from_file_with_diff(
+    file: PatchFile,
+    hash_code: Option<String>,
+    diff: Option<String>,
+) -> ToolResult {
     let mut output = match file.kind.as_str() {
         "create" => format!("Success. Created file:\nC {}", file.relative_path),
         "delete" => format!("Success. Deleted file:\nD {}", file.relative_path),
@@ -308,6 +339,9 @@ fn result_from_file(file: PatchFile, hash_code: Option<String>) -> ToolResult {
     let mut metadata = json!({ "file": file, "diagnostics": {} });
     if let Some(hash_code) = hash_code {
         metadata["hashCode"] = Value::String(hash_code);
+    }
+    if let Some(diff) = diff.filter(|value| !value.trim().is_empty()) {
+        metadata["diff"] = Value::String(diff);
     }
 
     ToolResult {
@@ -334,26 +368,189 @@ fn read_existing_with_hash_check(path: &Path, options: &FileActionOptions) -> Re
     Ok(bytes)
 }
 
-fn apply_diffy_text_patch(before_text: &str, patch_text: &str) -> Result<String> {
-    let trimmed = patch_text.trim_start();
+fn apply_line_text_patch(before_text: &str, patch_text: &str) -> Result<String> {
     if patch_text
         .lines()
         .any(|line| line.trim() == "*** Begin Patch")
     {
         return Err(anyhow!("old patch envelope format is not supported"));
     }
-    let owned_patch;
-    let patch_source = if trimmed.starts_with("@@") {
-        owned_patch = format!("--- file\n+++ file\n{patch_text}");
-        owned_patch.as_str()
-    } else {
-        patch_text
-    };
-    let patch = DiffyPatch::from_str(patch_source).context("failed to parse unified diff patch")?;
-    if patch.hunks().is_empty() {
-        return Err(anyhow!("patchText must contain at least one unified diff hunk"));
+    let ops = parse_line_patch(patch_text)?;
+    if ops.is_empty() {
+        return Err(anyhow!(
+            "patchText did not contain any line patch instructions"
+        ));
     }
-    diffy_apply(before_text, &patch).context("failed to apply unified diff patch")
+    apply_line_patch(before_text, &ops)
+}
+
+fn parse_line_patch(patch_text: &str) -> Result<Vec<LinePatchOp>> {
+    let lines: Vec<&str> = patch_text
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    let mut ops = Vec::new();
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let line = lines[idx];
+        let trimmed = line.trim();
+        idx += 1;
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("***DELETE***") {
+            let (start, end) = parse_line_range(rest.trim())
+                .with_context(|| format!("invalid DELETE instruction: `{line}`"))?;
+            ops.push(LinePatchOp::Delete { start, end });
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("***MOVE***") {
+            let (range, after) = rest
+                .trim()
+                .split_once(',')
+                .ok_or_else(|| anyhow!("MOVE must be `***MOVE*** start-end,startline`"))?;
+            let (start, end) = parse_line_range(range.trim())
+                .with_context(|| format!("invalid MOVE range: `{line}`"))?;
+            let after = parse_line_number(after.trim(), true)
+                .with_context(|| format!("invalid MOVE target: `{line}`"))?;
+            ops.push(LinePatchOp::Move { start, end, after });
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("***APPEND_HEAD***") {
+            let after = parse_line_number(rest.trim(), true)
+                .with_context(|| format!("invalid APPEND_HEAD target: `{line}`"))?;
+            let mut block = Vec::new();
+            let mut found_end = false;
+            while idx < lines.len() {
+                let item = lines[idx];
+                idx += 1;
+                if item.trim() == "***APPEND_END***" {
+                    found_end = true;
+                    break;
+                }
+                block.push(item.to_string());
+            }
+            if !found_end {
+                return Err(anyhow!("APPEND_HEAD block is missing ***APPEND_END***"));
+            }
+            ops.push(LinePatchOp::Append {
+                after,
+                lines: block,
+            });
+            continue;
+        }
+        if trimmed == "***APPEND_END***" {
+            return Err(anyhow!("APPEND_END without APPEND_HEAD"));
+        }
+        if let Some((number, text)) = line.split_once(':') {
+            let line_number = parse_line_number(number.trim(), false)
+                .with_context(|| format!("invalid replace instruction: `{line}`"))?;
+            ops.push(LinePatchOp::Replace {
+                line: line_number,
+                text: text.to_string(),
+            });
+            continue;
+        }
+        return Err(anyhow!(
+            "invalid patchText instruction `{line}`; expected `***DELETE*** start-end`, `***MOVE*** start-end,startline`, `***APPEND_HEAD*** startline ... ***APPEND_END***`, or `n:new text`"
+        ));
+    }
+    Ok(ops)
+}
+
+fn parse_line_range(value: &str) -> Result<(usize, usize)> {
+    let (start, end) = value
+        .split_once('-')
+        .ok_or_else(|| anyhow!("line range must be `start-end`"))?;
+    let start = parse_line_number(start.trim(), false)?;
+    let end = parse_line_number(end.trim(), false)?;
+    if start > end {
+        return Err(anyhow!("line range start {start} is after end {end}"));
+    }
+    Ok((start, end))
+}
+
+fn parse_line_number(value: &str, allow_zero: bool) -> Result<usize> {
+    let number = value
+        .parse::<usize>()
+        .with_context(|| format!("expected a positive line number, got `{value}`"))?;
+    if number == 0 && !allow_zero {
+        return Err(anyhow!("line number must be >= 1"));
+    }
+    Ok(number)
+}
+
+fn apply_line_patch(before_text: &str, ops: &[LinePatchOp]) -> Result<String> {
+    let had_final_newline = before_text.ends_with('\n');
+    let mut lines: Vec<String> = if before_text.is_empty() {
+        Vec::new()
+    } else {
+        before_text
+            .split_terminator('\n')
+            .map(str::to_string)
+            .collect()
+    };
+    for op in ops {
+        match op {
+            LinePatchOp::Delete { start, end } => {
+                ensure_line_range(&lines, *start, *end, "DELETE")?;
+                lines.drain(start - 1..*end);
+            }
+            LinePatchOp::Move { start, end, after } => {
+                ensure_line_range(&lines, *start, *end, "MOVE")?;
+                if (*start..=*end).contains(after) {
+                    return Err(anyhow!(
+                        "MOVE target line {after} is inside moved range {start}-{end}"
+                    ));
+                }
+                if *after > lines.len() {
+                    return Err(anyhow!(
+                        "MOVE target line {after} is out of range for {} line(s)",
+                        lines.len()
+                    ));
+                }
+                let moved: Vec<String> = lines.drain(start - 1..*end).collect();
+                let removed = end - start + 1;
+                let insert_after = if *after > *end {
+                    after - removed
+                } else {
+                    *after
+                };
+                lines.splice(insert_after..insert_after, moved);
+            }
+            LinePatchOp::Append {
+                after,
+                lines: block,
+            } => {
+                if *after > lines.len() {
+                    return Err(anyhow!(
+                        "APPEND_HEAD target line {after} is out of range for {} line(s)",
+                        lines.len()
+                    ));
+                }
+                lines.splice(*after..*after, block.clone());
+            }
+            LinePatchOp::Replace { line, text } => {
+                ensure_line_range(&lines, *line, *line, "replace")?;
+                lines[line - 1] = text.clone();
+            }
+        }
+    }
+    let mut out = lines.join("\n");
+    if had_final_newline || !lines.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn ensure_line_range(lines: &[String], start: usize, end: usize, label: &str) -> Result<()> {
+    if start == 0 || end == 0 || start > end || end > lines.len() {
+        return Err(anyhow!(
+            "{label} line range {start}-{end} is out of range for {} line(s)",
+            lines.len()
+        ));
+    }
+    Ok(())
 }
 
 fn parse_binary_patch(patch_text: &str) -> Result<Vec<BinaryHunk>> {
@@ -584,8 +781,7 @@ fn restore_line_endings(text: &str, line_ending: &str) -> String {
     }
 }
 
-fn patch_file(ctx: &ToolContext, path: &Path, before: &str, after: &str) -> PatchFile {
-    let diff = diff_text(path, before, after);
+fn patch_file(ctx: &ToolContext, path: &Path, diff: &str) -> PatchFile {
     let additions = count_diff_lines(&diff, '+');
     let deletions = count_diff_lines(&diff, '-');
     PatchFile {
