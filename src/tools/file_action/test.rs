@@ -46,6 +46,15 @@ async fn apply_text_patch_with_diff(initial: &str, patch_text: &str) -> (String,
     (fs::read_to_string(path).unwrap(), diff)
 }
 
+fn realistic_patch_text() -> String {
+    include_str!("fixtures/realistic_patch_request.txt")
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("patchText:"))
+        .expect("fixture should contain patchText")
+        .trim_start()
+        .replace("\\n", "\n")
+}
+
 #[tokio::test]
 async fn file_action_rejects_unrecognized_line_patch_without_writing() {
     let dir = tempdir().unwrap();
@@ -141,6 +150,26 @@ async fn file_action_line_patch_instruction_numbers_use_original_snapshot() {
         "{diff}"
     );
     assert!(!diff.contains("+three"), "{diff}");
+}
+
+#[tokio::test]
+async fn file_action_applies_realistic_agent_patch_from_original_snapshot() {
+    let initial = include_str!("fixtures/realistic_maic.txt");
+    let patch = realistic_patch_text();
+    assert!(patch.contains("***DELETE*** 491-491"), "{patch}");
+
+    let (out, diff) = apply_text_patch_with_diff(initial, &patch).await;
+
+    assert_eq!(out.lines().count(), 455);
+    assert!(out.contains(" * RK3506 MCU RPMsg version firmware."));
+    assert!(out.contains("if (get_time_us() - start > timeout_us)"));
+    assert!(out.contains("rpmsg_setup(link_id, 0x6800U, RPMSG_REINIT_TIMEOUT_US)"));
+    assert!(!out.contains("static inline uint32_t mcu_read_msp"));
+    assert!(
+        diff.contains("-static inline uint32_t mcu_read_msp")
+            && diff.contains("+ * RK3506 MCU RPMsg version firmware."),
+        "{diff}"
+    );
 }
 
 #[tokio::test]
