@@ -290,8 +290,16 @@ fn tools() -> Vec<Value> {
                     prop_desc("command", "string", "Command input must be at most 4KB"),
                     prop("shell", "string"),
                     prop("description", "string"),
-                    prop("timeout", "number"),
-                    prop("read_timeout", "number"),
+                    prop_desc(
+                        "timeout",
+                        "number",
+                        "Total lifetime timeout in ms for run/shell. For attach, timeout is accepted as a legacy read wait when read_timeout is absent, capped at 10000 ms.",
+                    ),
+                    prop_desc(
+                        "read_timeout",
+                        "number",
+                        "Read wait in ms. Attach uses this field; if timeout is also present, read_timeout wins.",
+                    ),
                     prop("asyncID", "string"),
                     prop_desc(
                         "text",

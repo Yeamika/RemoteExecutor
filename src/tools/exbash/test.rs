@@ -1,4 +1,5 @@
 use super::runs::{format_run_details, RunDetail};
+use super::{attach_read_timeout, ExbashOptions};
 use crate::{Executor, ExecutorInfo, ExecutorRequest, SettingsStore, ShellManager};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -7,6 +8,39 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+#[test]
+fn exbash_attach_read_timeout_prefers_read_timeout_and_caps_legacy_timeout() {
+    let mut options = ExbashOptions {
+        mode: Some("attach".to_string()),
+        shell: false,
+        shell_profile: None,
+        command: None,
+        description: None,
+        timeout: None,
+        read_timeout: None,
+        async_id: Some("rex-test".to_string()),
+        text: None,
+        file_path: None,
+        workdir: None,
+        show_raw_pretty: false,
+    };
+
+    assert_eq!(attach_read_timeout(&options).unwrap(), 10_000);
+
+    options.timeout = Some(15_000);
+    assert_eq!(attach_read_timeout(&options).unwrap(), 10_000);
+
+    options.timeout = Some(250);
+    assert_eq!(attach_read_timeout(&options).unwrap(), 250);
+
+    options.read_timeout = Some(25);
+    assert_eq!(attach_read_timeout(&options).unwrap(), 25);
+
+    options.read_timeout = None;
+    options.timeout = Some(-1);
+    assert!(attach_read_timeout(&options).is_err());
+}
 
 #[test]
 fn exbash_list_formats_description_and_clipped_command() {
@@ -1496,6 +1530,7 @@ async fn exbash_mode_attach_waits_read_timeout_and_returns_snapshot() {
         .unwrap()
         .to_string();
 
+    let legacy_timeout_started = Instant::now();
     let old_timeout = executor
         .handle(ExecutorRequest {
             id: json!(4),
@@ -1509,8 +1544,9 @@ async fn exbash_mode_attach_waits_read_timeout_and_returns_snapshot() {
             tool_timeout_ms: None,
         })
         .await;
-    assert!(!old_timeout.ok);
-    assert!(old_timeout.error.unwrap().contains("read_timeout"));
+    assert!(old_timeout.ok, "{:?}", old_timeout.error);
+    assert!(legacy_timeout_started.elapsed().as_millis() >= 90);
+    assert_eq!(old_timeout.result.unwrap()["metadata"]["wrote"], json!(0));
 
     let started = Instant::now();
     let attached = executor
@@ -1520,6 +1556,7 @@ async fn exbash_mode_attach_waits_read_timeout_and_returns_snapshot() {
             params: json!({"mode":"attach",
                 "asyncID": async_id.clone(),
                 "text":"hello snapshot\n",
+                "timeout":1,
                 "read_timeout":100
             }),
             directory: None,

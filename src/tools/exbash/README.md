@@ -2,7 +2,7 @@
 
 Tool name: `exbash`
 
-`exbash` is PTY-backed and uses `mode` to select the operation. It is not wrapped by the small-tool timeout. Run modes use `timeout` for total process lifetime and `read_timeout` for how long to wait before returning a snapshot.
+`exbash` is PTY-backed and uses `mode` to select the operation. It is not wrapped by the small-tool timeout. Run modes use `timeout` for total process lifetime and `read_timeout` for how long to wait before returning a snapshot. `attach` uses `read_timeout`; if only `timeout` is present, it is treated as the read wait capped at 10000 ms, and if both are present `read_timeout` wins.
 
 ## Input
 
@@ -39,8 +39,8 @@ Common fields:
 |---|---|
 | `command` | Command input, limited to 4096 bytes. |
 | `description` | Optional display text, limited to 100 bytes. |
-| `timeout` | Total runtime in ms. Omit, `0`, or `-1` means no total timeout. |
-| `read_timeout` | Read wait in ms. Defaults to `10000`. |
+| `timeout` | Total runtime in ms for `run` and `shell`. Omit, `0`, or `-1` means no total timeout. For `attach`, this is accepted as a legacy read wait when `read_timeout` is absent, capped at 10000 ms. |
+| `read_timeout` | Read wait in ms. Defaults to `10000`. `attach` prefers this field when both `timeout` and `read_timeout` are present. |
 | `asyncID` | Run id for `list`, `attach`, `stop`, and `remove`. |
 | `text` | Text input for `attach`, limited to 4096 bytes after escape parsing. Interactive programs may require control bytes; use `\n` for Enter/newline and `\u0003` for Ctrl-C/control bytes. |
 | `filePath` | File input for `attach`, limited to 4096 bytes. |

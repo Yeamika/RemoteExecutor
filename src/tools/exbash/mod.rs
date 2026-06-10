@@ -223,11 +223,7 @@ async fn remove(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult>
 }
 
 async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolResult> {
-    if options.timeout.is_some() {
-        return Err(anyhow!(
-            "read_timeout is required instead of timeout for mode attach"
-        ));
-    }
+    let read_timeout = attach_read_timeout(&options)?;
 
     let id = options
         .async_id
@@ -284,7 +280,7 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         &manager,
         &id,
         output_offset,
-        options.read_timeout.unwrap_or(INPUT_TIMEOUT),
+        read_timeout,
         controller.as_deref(),
     )
     .await?;
@@ -295,6 +291,19 @@ async fn attach_input(options: ExbashOptions, ctx: &ToolContext) -> Result<ToolR
         metadata: value.clone(),
         output: tool_output_full(message, snapshot, ""),
     })
+}
+
+fn attach_read_timeout(options: &ExbashOptions) -> Result<u64> {
+    if let Some(read_timeout) = options.read_timeout {
+        return Ok(read_timeout);
+    }
+    let Some(timeout) = options.timeout else {
+        return Ok(INPUT_TIMEOUT);
+    };
+    if timeout < 0 {
+        return Err(anyhow!("timeout must be non-negative for mode attach"));
+    }
+    Ok((timeout as u64).min(INPUT_TIMEOUT))
 }
 
 fn take_message(value: &mut serde_json::Value) -> String {
