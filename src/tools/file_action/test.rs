@@ -237,7 +237,7 @@ async fn file_action_applies_binary_offset_patch_with_hash_check() {
     let result = file_action(
         patch_action(
             path.clone(),
-            "insert 0\n+FE\nreplace 1 2\n+AA BB\ndelete 4 1\ninsert -1\n+CC\n+DD",
+            "***APPEND***0-1:FE\n1-2:AA BB\n***DELETE***4-1\n***APPEND***-1-2:CC DD",
             PatchMode::Binary,
             true,
             Some(hash_code),
@@ -254,12 +254,19 @@ async fn file_action_applies_binary_offset_patch_with_hash_check() {
     let new_hash = result.metadata["hashCode"].as_str().unwrap();
     assert!(new_hash.starts_with("sha256:"));
     assert!(result.metadata["file"]["type"] == "binary-update");
+    assert_eq!(result.metadata["file"]["additions"], 5);
+    assert_eq!(result.metadata["file"]["deletions"], 3);
+    let diff = result.metadata["diff"].as_str().unwrap();
+    assert!(diff.contains("--- "), "{diff}");
+    assert!(diff.contains("+++ "), "{diff}");
+    assert!(diff.contains("@@"), "{diff}");
+    assert!(diff.contains("+00000000: FE 00 AA BB 03 CC DD"), "{diff}");
     assert!(result.metadata["file"].get("before").is_none());
     assert!(result.metadata["file"].get("after").is_none());
 }
 
 #[tokio::test]
-async fn file_action_binary_rejects_copy_body_lines() {
+async fn file_action_binary_rejects_hex_length_mismatch() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.bin");
     fs::write(&path, [0x00, 0x01]).unwrap();
@@ -268,7 +275,7 @@ async fn file_action_binary_rejects_copy_body_lines() {
     let err = file_action(
         patch_action(
             path.clone(),
-            "replace 0 1\ncopy 0 1",
+            "***APPEND***0-2:AA",
             PatchMode::Binary,
             false,
             None,
@@ -279,7 +286,10 @@ async fn file_action_binary_rejects_copy_body_lines() {
     .unwrap_err()
     .to_string();
 
-    assert!(err.contains("copy body lines are not supported"), "{err}");
+    assert!(
+        err.contains("declares 2 byte(s) but contains 1 byte(s)"),
+        "{err}"
+    );
     assert_eq!(fs::read(path).unwrap(), [0x00, 0x01]);
 }
 

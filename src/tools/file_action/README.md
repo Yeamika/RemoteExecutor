@@ -73,7 +73,7 @@ Captured binary patch request:
     "mode": "patch",
     "filePath": "data.bin",
     "patchMode": "binary",
-    "patchText": "replace 10 2\n+AA BB"
+    "patchText": "10-2:AA BB"
   },
   "directory": "/tmp/re-doc-action"
 }
@@ -81,15 +81,14 @@ Captured binary patch request:
 
 Binary hunk headers use 0-based byte offsets:
 
-| Header | Meaning |
+| Instruction | Meaning |
 |---|---|
-| `replace OFFSET LEN` | Replace `LEN` bytes starting at `OFFSET`. |
-| `delete OFFSET LEN` | Delete `LEN` bytes starting at `OFFSET`. |
-| `insert 0` | Insert at the start. |
-| `insert -1` | Insert at the end. |
-| `insert OFFSET` | Insert at byte offset `OFFSET`. |
+| `OFFSET-LEN:HEX` | Replace `LEN` bytes starting at `OFFSET` with `HEX`. |
+| `***DELETE***OFFSET-LEN` | Delete `LEN` bytes starting at `OFFSET`. |
+| `***APPEND***OFFSET-LEN:HEX` | Insert `LEN` bytes at byte offset `OFFSET`. Use `OFFSET` 0 for the start and `-1` for the end. |
 
-Binary body lines must be `+HEX`. Multiple body lines concatenate. `copy` body lines are rejected in binary mode.
+`LEN` must match the number of decoded bytes in `HEX`. All offsets in one binary patch are interpreted against the file snapshot from the start of that patch.
+Binary patch results include `metadata.diff` as a unified diff over fixed-width hexdump lines so diff UIs can render the change without embedding raw binary content.
 
 ## Hash Checking
 
