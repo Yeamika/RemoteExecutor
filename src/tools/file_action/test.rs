@@ -373,6 +373,9 @@ async fn file_action_creates_text_file() {
         .starts_with("sha256:"));
     assert!(result.metadata["file"].get("before").is_none());
     assert!(result.metadata["file"].get("after").is_none());
+    let diff = result.metadata["diff"].as_str().unwrap();
+    assert!(diff.contains("+++ "), "{diff}");
+    assert!(diff.contains("+hello"), "{diff}");
 }
 
 #[tokio::test]
@@ -415,6 +418,9 @@ async fn file_action_deletes_file_with_hash_check() {
     assert!(result.metadata.get("hashCode").is_none());
     assert!(result.metadata["file"].get("before").is_none());
     assert!(result.metadata["file"].get("after").is_none());
+    let diff = result.metadata["diff"].as_str().unwrap();
+    assert!(diff.contains("--- "), "{diff}");
+    assert!(diff.contains("-remove me"), "{diff}");
 }
 
 #[tokio::test]

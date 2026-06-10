@@ -238,9 +238,14 @@ async fn create_file_action(
     fs::write(target, &bytes)
         .with_context(|| format!("failed to create file {}", target.display()))?;
     let file = action_file(ctx, target, "create", bytes.len(), 0);
-    Ok(result_from_file(
+    let diff = match options.patch_mode {
+        PatchMode::Text => diff_text(target, "", content),
+        PatchMode::Binary => diff_binary(target, &[], &bytes),
+    };
+    Ok(result_from_file_with_diff(
         file,
         options.hash_check_mode.then_some(hash_bytes(&bytes)),
+        Some(diff),
     ))
 }
 
@@ -250,10 +255,11 @@ async fn delete_file_action(
     options: &FileActionOptions,
 ) -> Result<ToolResult> {
     let before = read_existing_with_hash_check(target, options)?;
+    let diff = delete_diff(target, &before, options.patch_mode);
     fs::remove_file(target)
         .with_context(|| format!("failed to delete file {}", target.display()))?;
     let file = action_file(ctx, target, "delete", 0, before.len());
-    Ok(result_from_file(file, None))
+    Ok(result_from_file_with_diff(file, None, Some(diff)))
 }
 
 async fn rename_file_action(
@@ -1016,6 +1022,15 @@ fn diff_text(path: &Path, before: &str, after: &str) -> String {
 
 fn diff_binary(path: &Path, before: &[u8], after: &[u8]) -> String {
     diff_text(path, &binary_diff_text(before), &binary_diff_text(after))
+}
+
+fn delete_diff(path: &Path, before: &[u8], mode: PatchMode) -> String {
+    if mode == PatchMode::Binary {
+        return diff_binary(path, before, &[]);
+    }
+    TextShape::from_bytes(before.to_vec())
+        .map(|shape| diff_text(path, &shape.text, ""))
+        .unwrap_or_else(|_| diff_binary(path, before, &[]))
 }
 
 fn binary_diff_text(bytes: &[u8]) -> String {
