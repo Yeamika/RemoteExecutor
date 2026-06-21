@@ -28,7 +28,16 @@ async fn caller_lists_local_executor() {
 
     assert!(response.ok);
     assert_eq!(response.executor.as_deref(), Some("caller"));
-    assert!(response.result.unwrap().to_string().contains("local"));
+    let result = response.result.unwrap();
+    assert!(result.to_string().contains("local"));
+    let local = result["metadata"]["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|executor| executor["id"] == "local")
+        .unwrap();
+    assert_eq!(local["fileTransfer"], json!(true));
+    assert_eq!(local["fileTransferPath"], json!("/re-file/v1"));
 }
 
 #[tokio::test]
@@ -152,6 +161,25 @@ async fn caller_routes_to_connected_executor() {
         })
         .await
         .unwrap();
+    let listed = caller
+        .handle(ExecutorRequest {
+            id: json!("list-remote-file-transfer"),
+            method: "list_executor".to_string(),
+            params: json!({}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    let listed = listed.result.unwrap();
+    let remote = listed["metadata"]["executors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|executor| executor["id"] == "remote")
+        .unwrap();
+    assert_eq!(remote["fileTransfer"], json!(true));
+    assert_eq!(remote["fileTransferPath"], json!("/re-file/v1"));
     caller.set_default_executor("remote").await.unwrap();
 
     let response = caller

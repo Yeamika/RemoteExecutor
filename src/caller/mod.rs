@@ -19,6 +19,7 @@ use pty_t_core::TermSize;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
@@ -55,6 +56,24 @@ pub struct SetDefaultExecutorOptions {
     pub id: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct FileTransferOptions {
+    pub mode: FileTransferMode,
+    #[serde(rename = "localPath")]
+    pub local_path: PathBuf,
+    #[serde(rename = "targetPath")]
+    pub target_path: PathBuf,
+    #[serde(default)]
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FileTransferMode {
+    Download,
+    Upload,
+}
+
 #[derive(Clone)]
 pub struct Caller {
     state: Arc<Mutex<CallerState>>,
@@ -72,6 +91,7 @@ struct CallerState {
 struct ExecutorEndpoint {
     info: ExecutorInfo,
     url: String,
+    file_transfer: bool,
 }
 
 impl Caller {
@@ -94,10 +114,12 @@ impl Caller {
             .with_shell_manager(shell_manager.clone())
             .with_settings_store(settings);
         let local_info = local.info().clone();
-        let local_addr = start_shared_executor_ws("127.0.0.1:0", local, shell_manager.clone())?;
+        let local_addr =
+            start_shared_executor_ws("127.0.0.1:0", local.clone(), shell_manager.clone())?;
         let local_endpoint = ExecutorEndpoint {
             info: local_info,
             url: format!("ws://{local_addr}"),
+            file_transfer: true,
         };
         let mut executors = BTreeMap::new();
         executors.insert("local".to_string(), local_endpoint);
@@ -145,6 +167,9 @@ impl Caller {
         if is_set_default_executor(&request.method) {
             return self.set_default_response(request).await;
         }
+        if is_file_transfer(&request.method) {
+            return self.file_transfer_response(request).await;
+        }
 
         let request_id = request.id.clone();
         let selected = match self.select_executor(request.executor.as_deref()).await {
@@ -162,7 +187,7 @@ impl Caller {
             return Err(anyhow!("local executor is reserved"));
         }
 
-        let endpoint = ExecutorEndpoint {
+        let mut endpoint = ExecutorEndpoint {
             info: ExecutorInfo {
                 id: options.id.clone(),
                 system: options.system,
@@ -170,7 +195,9 @@ impl Caller {
                 labels: options.labels,
             },
             url: normalize_ws_url(&options.url),
+            file_transfer: false,
         };
+        let _ = endpoint.refresh_info().await;
         self.state
             .lock()
             .await
@@ -214,6 +241,8 @@ impl Caller {
                     "device": endpoint.info.device,
                     "labels": endpoint.info.labels,
                     "url": endpoint.url,
+                    "fileTransfer": endpoint.file_transfer,
+                    "fileTransferPath": "/re-file/v1",
                 })
             })
             .collect::<Vec<_>>();
@@ -249,6 +278,22 @@ impl Caller {
         }
     }
 
+    async fn file_transfer_response(&self, request: ExecutorRequest) -> ExecutorResponse {
+        let id = request.id.clone();
+        let options = match serde_json::from_value::<FileTransferOptions>(request.params) {
+            Ok(options) => options,
+            Err(err) => return self.err(id, format!("bad file_transfer params: {err}")),
+        };
+        let selected = match self.select_executor(request.executor.as_deref()).await {
+            Ok(endpoint) => endpoint,
+            Err(err) => return self.err(id, err.to_string()),
+        };
+        match selected.file_transfer_result(options, request.directory.as_deref()) {
+            Ok(result) => self.ok(id, result),
+            Err(err) => self.err(id, err.to_string()),
+        }
+    }
+
     fn ok(&self, id: Value, result: ToolResult) -> ExecutorResponse {
         ExecutorResponse::ok(id, Some("caller".to_string()), json!(result))
     }
@@ -259,6 +304,52 @@ impl Caller {
 }
 
 impl ExecutorEndpoint {
+    async fn refresh_info(&mut self) -> Result<()> {
+        let request = ExecutorRequest {
+            id: json!("_executor_info"),
+            method: "_executor_info".to_string(),
+            params: json!({}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        };
+        let response = call_ws(&self.url, request, Some(DEFAULT_CALL_TIMEOUT_MS)).await?;
+        if !response.ok {
+            return Err(anyhow!(response
+                .error
+                .unwrap_or_else(|| "_executor_info failed".to_string())));
+        }
+        let result = response.result.unwrap_or(Value::Null);
+        let metadata = result.get("metadata").unwrap_or(&result);
+        if self.info.system.is_none() {
+            self.info.system = metadata
+                .get("system")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if self.info.device.is_none() {
+            self.info.device = metadata
+                .get("device")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if self.info.labels.is_empty() {
+            if let Some(labels) = metadata.get("labels").and_then(Value::as_object) {
+                self.info.labels = labels
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect();
+            }
+        }
+        self.file_transfer = metadata
+            .pointer("/capabilities/fileTransfer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(())
+    }
+
     async fn call(&self, mut request: ExecutorRequest) -> ExecutorResponse {
         let request_id = request.id.clone();
         let call_timeout_ms = call_timeout_ms_for(&request);
@@ -276,6 +367,69 @@ impl ExecutorEndpoint {
                 format!("executor {} call failed: {err}", self.info.id),
             ),
         }
+    }
+
+    fn file_transfer_result(
+        &self,
+        options: FileTransferOptions,
+        directory: Option<&std::path::Path>,
+    ) -> Result<ToolResult> {
+        if !self.file_transfer {
+            return Err(anyhow!(
+                "executor {} does not advertise file transfer support",
+                self.info.id
+            ));
+        }
+        let url = http_file_transfer_url(&self.url)?;
+        let method = match options.mode {
+            FileTransferMode::Download => "GET",
+            FileTransferMode::Upload => "PUT",
+        };
+        let mut headers = serde_json::Map::new();
+        headers.insert(
+            "X-RE-Path".to_string(),
+            Value::String(options.target_path.to_string_lossy().into_owned()),
+        );
+        if let Some(directory) = directory {
+            headers.insert(
+                "X-RE-Directory".to_string(),
+                Value::String(directory.to_string_lossy().into_owned()),
+            );
+        }
+        if let Some(overwrite) = options.overwrite {
+            headers.insert(
+                "X-RE-Overwrite".to_string(),
+                Value::String(overwrite.to_string()),
+            );
+        }
+        let metadata = json!({
+            "executor": self.info.id,
+            "mode": match method {
+                "GET" => "download",
+                _ => "upload",
+            },
+            "localPath": options.local_path,
+            "targetPath": options.target_path,
+            "method": method,
+            "url": url,
+            "headers": headers,
+        });
+        let header_lines = metadata["headers"]
+            .as_object()
+            .into_iter()
+            .flat_map(|headers| headers.iter())
+            .map(|(key, value)| format!("{key}: {}", value.as_str().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if header_lines.is_empty() {
+            format!("{method} {url}")
+        } else {
+            format!("{method} {url}\n{header_lines}")
+        };
+        Ok(ToolResult {
+            metadata,
+            output: tool_output(text),
+        })
     }
 }
 
@@ -412,6 +566,18 @@ fn normalize_ws_url(url: &str) -> String {
     }
 }
 
+fn http_file_transfer_url(control_url: &str) -> Result<String> {
+    if let Some(rest) = control_url.strip_prefix("ws://") {
+        return Ok(format!("http://{rest}/re-file/v1"));
+    }
+    if let Some(rest) = control_url.strip_prefix("wss://") {
+        return Ok(format!("https://{rest}/re-file/v1"));
+    }
+    Err(anyhow!(
+        "unsupported executor URL for file transfer: {control_url}"
+    ))
+}
+
 fn call_timeout_ms_for(request: &ExecutorRequest) -> Option<u64> {
     if request.method == "exbash" {
         let read_timeout = request
@@ -446,6 +612,10 @@ fn is_connect_executor(method: &str) -> bool {
 
 fn is_set_default_executor(method: &str) -> bool {
     method == "set_default_executor"
+}
+
+fn is_file_transfer(method: &str) -> bool {
+    method == "file_transfer"
 }
 
 fn is_write_method(method: &str) -> bool {

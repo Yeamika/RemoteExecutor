@@ -16,7 +16,7 @@ Run a standalone Executor node:
 cargo run --bin remote-executor -- --id linux-box --listen 0.0.0.0:9001
 ```
 
-The same `--listen` endpoint now accepts both Caller tool requests and `pty-t` clients.
+The same `--listen` endpoint now accepts Caller tool requests, `pty-t` clients, and HTTP file-transfer connections. Users still configure only the control WebSocket URL; Caller discovers same-port file-transfer support from the control bus and includes `fileTransfer: true` with `fileTransferPath` in `list_executor`.
 
 Release packages include GNU Linux builds plus musl static Linux builds. Use the `*-musl-static` packages for older distributions such as Ubuntu 18 or minimal buildroot-style systems where newer glibc dependencies are a problem. For 32-bit systems, use `remote-executor-linux-i686-musl-static` on x86 and try `remote-executor-linux-armv7-musl-static` first on ARM SoC boards.
 
@@ -106,3 +106,12 @@ Detached `exbash` runs are visible as PTY sessions on the same Executor WebSocke
 `exbash` mode `attach` waits until its `read_timeout` elapses, then returns the current PTY window snapshot in `output.text`. Metadata keeps `wrote`, `source`, and `outputBytes`, where `outputBytes` is the number of PTY output bytes captured after attach started. If `showRawPretty` is true, attach also includes `rawPretty` in metadata; it defaults to false. When attach sends input, it takes PTY controller as `rec:<asyncID>` and leaves that controller in place; if a ptyt/ptyc client takes control before `read_timeout`, attach fails immediately with `control lost: someone attached: <client-id>`. If the task already stopped, attach returns the final snapshot immediately, sets `state` and `exitCode` in metadata, and puts the status text in `output.message`; when input was requested, `output.message` starts with `input failed`. Mode `stop` also returns a plain text snapshot in `output.text`; mode `remove` returns `ok` in `output.text` with `metadata.ok = true`. It does not write log files or accept a tail-size argument.
 When RE kills a run because of total `timeout` or mode `stop`, `exitCode` is the string `"timeout"` or `"stopped"`; normal process exits still use numeric exit codes.
 `exbash` inputs are intentionally small: `command`, `filePath`, attach `text` (stdin content), and attach file contents are limited to 4096 bytes; `description` is limited to 100 bytes and `asyncID` is limited to 30 bytes. Oversized inputs are rejected.
+
+File transfer:
+
+- The control bus reports `fileTransfer: true` and `fileTransferPath: /re-file/v1`; clients derive the HTTP URL from the configured WebSocket URL, for example `ws://host:9001` maps to `http://host:9001/re-file/v1`.
+- The `file_transfer` tool prepares transfer metadata with two paths: `localPath` on the caller/opencode side and `targetPath` on the selected Executor side. `mode: "download"` means `targetPath -> localPath`; `mode: "upload"` means `localPath -> targetPath`.
+- Download uses `GET` with `X-RE-Path`, optional `X-RE-Directory`, optional `X-RE-Offset`, and optional `X-RE-Hash: true`.
+- Upload uses `PUT` with `X-RE-Path`, optional `X-RE-Directory`, optional `X-RE-Overwrite: true`, optional `X-RE-Sha256`, and required `Content-Length`.
+- Upload writes to a temporary file first, then renames into place after size/hash validation.
+- Upload shares the same Executor-side write lock as `FileAction`; read, search, and terminal traffic stay on the control/PTY path.

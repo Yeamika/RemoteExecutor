@@ -86,6 +86,18 @@ async fn mcp_initialize_and_lists_tools() {
     let reload_properties = &request_reload["inputSchema"]["properties"];
     assert!(reload_properties.get("targetExecutor").is_some());
     assert!(reload_properties.get("directory").is_none());
+
+    let file_transfer = tools
+        .iter()
+        .find(|tool| tool["name"] == "file_transfer")
+        .unwrap();
+    let transfer_properties = &file_transfer["inputSchema"]["properties"];
+    assert!(transfer_properties.get("mode").is_some());
+    assert!(transfer_properties.get("localPath").is_some());
+    assert!(transfer_properties.get("targetPath").is_some());
+    assert!(transfer_properties.get("filePath").is_none());
+    assert!(transfer_properties.get("targetExecutor").is_some());
+    assert!(transfer_properties.get("directory").is_none());
 }
 
 #[tokio::test]
@@ -119,6 +131,51 @@ async fn mcp_calls_caller_tool_over_stdio_shape() {
         .as_str()
         .unwrap()
         .contains("hello mcp"));
+}
+
+#[tokio::test]
+async fn mcp_prepares_same_port_file_transfer_request() {
+    let caller = Caller::new().await.unwrap();
+    let response = handle_mcp_message(
+        &caller,
+        json!({
+            "jsonrpc":"2.0",
+            "id":30,
+            "method":"tools/call",
+            "params":{
+                "name":"file_transfer",
+                "arguments":{
+                    "mode":"download",
+                    "localPath":"./downloaded.bin",
+                    "targetPath":"file.bin"
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["metadata"]["mode"], json!("download"));
+    assert_eq!(structured["metadata"]["method"], json!("GET"));
+    assert!(structured["metadata"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("http://"));
+    assert!(structured["metadata"]["url"]
+        .as_str()
+        .unwrap()
+        .ends_with("/re-file/v1"));
+    assert_eq!(
+        structured["metadata"]["headers"]["X-RE-Path"],
+        json!("file.bin")
+    );
+    assert_eq!(
+        structured["metadata"]["localPath"],
+        json!("./downloaded.bin")
+    );
+    assert_eq!(structured["metadata"]["targetPath"], json!("file.bin"));
 }
 
 #[tokio::test]

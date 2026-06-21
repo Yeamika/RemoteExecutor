@@ -1,9 +1,14 @@
-use crate::{start_shared_executor_ws, Executor, ExecutorRequest, ExecutorResponse, ShellManager};
+use crate::{
+    hash_bytes, start_shared_executor_ws, Executor, ExecutorRequest, ExecutorResponse, ShellManager,
+};
 use futures_util::{SinkExt, StreamExt};
 use pty_t_protocol::{AdminText, ClientText, ServerText};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -55,6 +60,95 @@ async fn shared_endpoint_accepts_tool_and_pty_protocols() {
         panic!("expected pty sessions response");
     };
     assert!(sessions.iter().any(|session| session.pty == "main"));
+}
+
+#[tokio::test]
+async fn shared_endpoint_reports_dedicated_file_transfer_url_and_transfers_files() {
+    let dir = tempdir().unwrap();
+    let source = b"download bytes\nwith binary-ish \x00 data\n".to_vec();
+    fs::write(dir.path().join("source.bin"), &source).unwrap();
+
+    let manager = ShellManager::default_shell(80, 24);
+    let addr = start_shared_executor_ws(
+        "127.0.0.1:0",
+        Executor::local("shared-file-transfer"),
+        manager,
+    )
+    .unwrap();
+    let control_url = format!("ws://{addr}");
+
+    let (mut control_ws, _) = connect_async(&control_url).await.unwrap();
+    let info_request = ExecutorRequest {
+        id: json!("info"),
+        method: "_executor_info".to_string(),
+        params: json!({}),
+        directory: None,
+        executor: None,
+        tool_timeout_ms: None,
+    };
+    control_ws
+        .send(Message::Text(
+            serde_json::to_string(&info_request).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let Message::Text(info_response) = control_ws.next().await.unwrap().unwrap() else {
+        panic!("expected executor info response");
+    };
+    let info_response: ExecutorResponse = serde_json::from_str(&info_response).unwrap();
+    assert!(info_response.ok, "{:?}", info_response.error);
+    let metadata = info_response.result.unwrap()["metadata"].clone();
+    assert_eq!(metadata["capabilities"]["fileTransfer"], json!(true));
+    assert_eq!(metadata["fileTransferPath"], json!("/re-file/v1"));
+    let file_url = control_url
+        .replacen("ws://", "http://", 1)
+        .replace("/re-file/v1", "")
+        + "/re-file/v1";
+    assert_ne!(file_url, control_url);
+    let (_, file_port, file_path) = parse_http_url(&file_url);
+    let control_port = control_url
+        .rsplit_once(':')
+        .unwrap()
+        .1
+        .parse::<u16>()
+        .unwrap();
+    assert_eq!(file_port, control_port);
+    assert_eq!(file_path, "/re-file/v1");
+
+    assert!(file_url.starts_with("http://"), "{file_url}");
+    let (status, download_headers, downloaded) = http_request(
+        &file_url,
+        &format!(
+            "GET {{path}} HTTP/1.1\r\nX-RE-Directory: {}\r\nX-RE-Path: source.bin\r\nX-RE-Hash: true\r\nConnection: close\r\n\r\n",
+            dir.path().display()
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(downloaded, source);
+    assert_eq!(
+        download_headers.get("x-re-sha256").map(String::as_str),
+        Some(hash_bytes(&source).as_str())
+    );
+
+    let upload = b"uploaded payload\nsecond line\n".to_vec();
+    let (status, _, upload_body) = http_request(
+        &file_url,
+        &format!(
+            "PUT {{path}} HTTP/1.1\r\nX-RE-Directory: {}\r\nX-RE-Path: uploaded.bin\r\nX-RE-Sha256: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            dir.path().display(),
+            hash_bytes(&upload),
+            upload.len()
+        ),
+        &upload,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let done: serde_json::Value = serde_json::from_slice(&upload_body).unwrap();
+    assert_eq!(done["type"], json!("re.file.v1.done"));
+    assert_eq!(done["sha256"], json!(hash_bytes(&upload)));
+    assert_eq!(fs::read(dir.path().join("uploaded.bin")).unwrap(), upload);
 }
 
 #[tokio::test]
@@ -346,4 +440,56 @@ async fn exbash_mode_remove_closes_connected_pty_client() {
     .await
     .unwrap();
     assert!(close);
+}
+
+async fn http_request(
+    url: &str,
+    request_template: &str,
+    body: &[u8],
+) -> (u16, BTreeMap<String, String>, Vec<u8>) {
+    let (host, port, path) = parse_http_url(url);
+    let mut stream = TcpStream::connect(format!("{host}:{port}")).await.unwrap();
+    let request = request_template.replace("{path}", &path).replacen(
+        "\r\n",
+        &format!("\r\nHost: {host}:{port}\r\n"),
+        1,
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    stream.shutdown().await.unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    parse_http_response(&response)
+}
+
+fn parse_http_url(url: &str) -> (String, u16, String) {
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let (host_port, path) = rest.split_once('/').unwrap();
+    let (host, port) = host_port.rsplit_once(':').unwrap();
+    (host.to_string(), port.parse().unwrap(), format!("/{path}"))
+}
+
+fn parse_http_response(bytes: &[u8]) -> (u16, BTreeMap<String, String>, Vec<u8>) {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let headers_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
+    let mut lines = headers_text.split("\r\n");
+    let status = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    let headers = lines
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    (status, headers, bytes[header_end + 4..].to_vec())
 }

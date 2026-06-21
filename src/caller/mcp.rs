@@ -281,13 +281,35 @@ fn tools() -> Vec<Value> {
             false,
         ),
         executor_tool(
+            "file_transfer",
+            "Prepare same-port HTTP file transfer request metadata; bytes are transferred outside MCP",
+            schema(
+                &["mode", "localPath", "targetPath"],
+                &[
+                    prop("mode", "string"),
+                    prop("localPath", "string"),
+                    prop("targetPath", "string"),
+                    prop("overwrite", "boolean"),
+                ],
+            ),
+            false,
+        ),
+        executor_tool(
             "exbash",
-            "Run, shell-run, list, attach, stop, or remove a PTY-backed command using mode",
+            "PTY-backed background terminal. Prefer shell mode for ordinary commands because it uses the configured shell and normal program lookup. Use run only when the first token is an explicit executable program; run splits command into executable + args without shell parsing.",
             schema(
                 &["mode"],
                 &[
-                    prop("mode", "string"),
-                    prop_desc("command", "string", "Command input must be at most 4KB"),
+                    prop_desc(
+                        "mode",
+                        "string",
+                        "Operation selector. Prefer shell for normal commands; run requires an explicit executable program as the first token and does not use shell syntax.",
+                    ),
+                    prop_desc(
+                        "command",
+                        "string",
+                        "Command input must be at most 4KB. In shell mode it is sent to the configured shell; in run mode it is split into executable + argv without shell parsing.",
+                    ),
                     prop("shell", "string"),
                     prop("description", "string"),
                     prop_desc(

@@ -4,11 +4,12 @@ mod test;
 mod ws;
 
 use crate::{
-    exbash, file_action, glob_paths, list_shells, read_path, request_reload, rg_search,
-    set_default_shell, stat_path, tool_output, ExbashOptions, ExecutorInfo, ExecutorRequest,
-    ExecutorResponse, FileActionOptions, GlobOptions, ListShellsOptions, ReadOptions,
-    RequestReloadOptions, RgOptions, SetDefaultShellOptions, SettingsStore, ShellManager,
-    StatOptions, ToolContext, ToolResult,
+    exbash, file_action, glob_paths, handle_file_transfer_http, is_file_transfer_http_request,
+    list_shells, read_path, request_reload, rg_search, set_default_shell, stat_path, tool_output,
+    ExbashOptions, ExecutorInfo, ExecutorRequest, ExecutorResponse, FileActionOptions,
+    FileTransferState, GlobOptions, ListShellsOptions, ReadOptions, RequestReloadOptions,
+    RgOptions, SetDefaultShellOptions, SettingsStore, ShellManager, StatOptions, ToolContext,
+    ToolResult,
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -16,8 +17,9 @@ use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -30,8 +32,9 @@ pub struct Executor {
     info: ExecutorInfo,
     shell_manager: Option<ShellManager>,
     settings_store: SettingsStore,
-    directory_settings: Arc<Mutex<BTreeMap<PathBuf, SettingsStore>>>,
+    directory_settings: Arc<StdMutex<BTreeMap<PathBuf, SettingsStore>>>,
     workspace_settings: bool,
+    write_lock: Arc<AsyncMutex<()>>,
 }
 
 impl Executor {
@@ -40,8 +43,9 @@ impl Executor {
             info,
             shell_manager: None,
             settings_store: SettingsStore::load_default_lossy(),
-            directory_settings: Arc::new(Mutex::new(BTreeMap::new())),
+            directory_settings: Arc::new(StdMutex::new(BTreeMap::new())),
             workspace_settings: false,
+            write_lock: Arc::new(AsyncMutex::new(())),
         }
     }
     pub fn local(id: impl Into<String>) -> Self {
@@ -66,7 +70,7 @@ impl Executor {
 
     pub fn with_settings_store(mut self, settings_store: SettingsStore) -> Self {
         self.settings_store = settings_store;
-        self.directory_settings = Arc::new(Mutex::new(BTreeMap::new()));
+        self.directory_settings = Arc::new(StdMutex::new(BTreeMap::new()));
         self
     }
 
@@ -78,6 +82,13 @@ impl Executor {
     pub async fn handle(&self, request: ExecutorRequest) -> ExecutorResponse {
         let id = request.id.clone();
         let method = request.method.clone();
+        if method == "_executor_info" {
+            return ExecutorResponse::ok(
+                id,
+                Some(self.info.id.clone()),
+                serde_json::json!(self.executor_info_result()),
+            );
+        }
         let directory = request.directory.clone();
         let timeout_ms = effective_tool_timeout_ms(request.tool_timeout_ms);
         let params = apply_soft_timeout_param(&method, request.params, request.tool_timeout_ms);
@@ -91,20 +102,13 @@ impl Executor {
         if let Some(shell_manager) = &self.shell_manager {
             ctx = ctx.with_shell_manager(shell_manager.clone());
         }
-        let result = if is_exbash_method(&method) || is_soft_timeout_method(&method) {
-            dispatch_tool(&method, params, &ctx).await
+        let result = if is_write_method(&method) {
+            let _guard = self.write_lock.lock().await;
+            self.dispatch_with_timeout(&method, params, &ctx, timeout_ms)
+                .await
         } else {
-            match timeout(
-                Duration::from_millis(timeout_ms),
-                dispatch_tool(&method, params, &ctx),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!(
-                    "tool {method} timed out after {timeout_ms}ms"
-                )),
-            }
+            self.dispatch_with_timeout(&method, params, &ctx, timeout_ms)
+                .await
         };
 
         match result {
@@ -112,6 +116,46 @@ impl Executor {
                 ExecutorResponse::ok(id, Some(self.info.id.clone()), serde_json::json!(output))
             }
             Err(err) => ExecutorResponse::err(id, Some(self.info.id.clone()), err.to_string()),
+        }
+    }
+
+    async fn dispatch_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        ctx: &ToolContext,
+        timeout_ms: u64,
+    ) -> Result<ToolResult> {
+        if is_exbash_method(method) || is_soft_timeout_method(method) {
+            return dispatch_tool(method, params, ctx).await;
+        }
+        match timeout(
+            Duration::from_millis(timeout_ms),
+            dispatch_tool(method, params, ctx),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "tool {method} timed out after {timeout_ms}ms"
+            )),
+        }
+    }
+
+    fn executor_info_result(&self) -> ToolResult {
+        let value = serde_json::json!({
+            "id": self.info.id,
+            "system": self.info.system,
+            "device": self.info.device,
+            "labels": self.info.labels,
+            "capabilities": {
+                "fileTransfer": true,
+            },
+            "fileTransferPath": "/re-file/v1",
+        });
+        ToolResult {
+            metadata: value.clone(),
+            output: tool_output(serde_json::to_string_pretty(&value).unwrap_or_default()),
         }
     }
 
@@ -152,14 +196,18 @@ pub fn start_shared_executor_ws(
     std_listener.set_nonblocking(true)?;
     let listener = TcpListener::from_std(std_listener)?;
     let actual_addr = listener.local_addr()?.to_string();
+    let file_state = FileTransferState::new(executor.write_lock.clone());
     let executor = executor.with_shell_manager(manager.clone());
 
     tokio::spawn(async move {
         while let Ok((stream, peer_addr)) = listener.accept().await {
             let executor = executor.clone();
             let manager = manager.clone();
+            let file_state = file_state.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_shared_ws(stream, peer_addr, executor, manager).await {
+                if let Err(err) =
+                    handle_shared_connection(stream, peer_addr, executor, manager, file_state).await
+                {
                     if is_disconnect_error(&err) {
                         return;
                     }
@@ -170,6 +218,19 @@ pub fn start_shared_executor_ws(
     });
 
     Ok(actual_addr)
+}
+
+async fn handle_shared_connection(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    executor: Executor,
+    manager: crate::ShellManager,
+    file_state: FileTransferState,
+) -> Result<()> {
+    if is_file_transfer_http_request(&stream).await? {
+        return handle_file_transfer_http(stream, file_state).await;
+    }
+    handle_shared_ws(stream, peer_addr, executor, manager).await
 }
 
 async fn handle_shared_ws(
@@ -236,6 +297,10 @@ fn effective_tool_timeout_ms(requested: Option<u64>) -> u64 {
 
 fn is_exbash_method(method: &str) -> bool {
     method == "exbash"
+}
+
+fn is_write_method(method: &str) -> bool {
+    matches!(method, "FileAction" | "set_default_shell")
 }
 
 fn is_soft_timeout_method(method: &str) -> bool {

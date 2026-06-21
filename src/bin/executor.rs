@@ -50,7 +50,10 @@ async fn main() -> Result<()> {
     };
     manager.create_pty(args.pty.clone(), pty_command, None, None)?;
     let actual = start_shared_executor_ws(args.listen, executor, manager)?;
-    println!("ws://{actual} pty={}", args.pty);
+    println!(
+        "ws://{actual} file=http://{actual}/re-file/v1 pty={}",
+        args.pty
+    );
 
     tokio::signal::ctrl_c().await?;
     Ok(())

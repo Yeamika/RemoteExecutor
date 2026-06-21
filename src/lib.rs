@@ -1,6 +1,7 @@
 mod caller;
 mod context;
 mod executor;
+mod file_transfer;
 mod protocol;
 mod settings;
 mod shell_manager;
@@ -15,6 +16,9 @@ pub use caller::{
 };
 pub use context::ToolContext;
 pub use executor::{dispatch_tool, start_shared_executor_ws, Executor};
+pub(crate) use file_transfer::{
+    handle_file_transfer_http, is_file_transfer_http_request, FileTransferState,
+};
 pub use protocol::{
     tool_output, tool_output_full, tool_output_with_info, ExecutorInfo, ExecutorRequest,
     ExecutorResponse, ToolResult,
