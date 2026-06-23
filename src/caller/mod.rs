@@ -91,7 +91,10 @@ struct CallerState {
 struct ExecutorEndpoint {
     info: ExecutorInfo,
     url: String,
+    protocol: Option<String>,
+    version: Option<String>,
     file_transfer: bool,
+    file_transfer_path: String,
 }
 
 impl Caller {
@@ -119,7 +122,10 @@ impl Caller {
         let local_endpoint = ExecutorEndpoint {
             info: local_info,
             url: format!("ws://{local_addr}"),
+            protocol: Some("remote-executor".to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
             file_transfer: true,
+            file_transfer_path: "/re-file/v1".to_string(),
         };
         let mut executors = BTreeMap::new();
         executors.insert("local".to_string(), local_endpoint);
@@ -195,9 +201,12 @@ impl Caller {
                 labels: options.labels,
             },
             url: normalize_ws_url(&options.url),
+            protocol: None,
+            version: None,
             file_transfer: false,
+            file_transfer_path: "/re-file/v1".to_string(),
         };
-        let _ = endpoint.refresh_info().await;
+        endpoint.refresh_info().await?;
         self.state
             .lock()
             .await
@@ -241,8 +250,10 @@ impl Caller {
                     "device": endpoint.info.device,
                     "labels": endpoint.info.labels,
                     "url": endpoint.url,
+                    "protocol": endpoint.protocol,
+                    "version": endpoint.version,
                     "fileTransfer": endpoint.file_transfer,
-                    "fileTransferPath": "/re-file/v1",
+                    "fileTransferPath": endpoint.file_transfer_path,
                 })
             })
             .collect::<Vec<_>>();
@@ -321,6 +332,20 @@ impl ExecutorEndpoint {
         }
         let result = response.result.unwrap_or(Value::Null);
         let metadata = result.get("metadata").unwrap_or(&result);
+        let version = metadata
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("executor info missing version"))?;
+        let capabilities = metadata
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("executor info missing capabilities"))?;
+        self.protocol = metadata
+            .get("protocol")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.version = Some(version.to_string());
         if self.info.system.is_none() {
             self.info.system = metadata
                 .get("system")
@@ -347,6 +372,15 @@ impl ExecutorEndpoint {
             .pointer("/capabilities/fileTransfer")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        self.file_transfer_path = metadata
+            .get("fileTransferPath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("/re-file/v1")
+            .to_string();
+        if self.file_transfer && !capabilities.contains_key("fileTransfer") {
+            return Err(anyhow!("executor info missing fileTransfer capability"));
+        }
         Ok(())
     }
 

@@ -98,6 +98,8 @@ async fn shared_endpoint_reports_dedicated_file_transfer_url_and_transfers_files
     let info_response: ExecutorResponse = serde_json::from_str(&info_response).unwrap();
     assert!(info_response.ok, "{:?}", info_response.error);
     let metadata = info_response.result.unwrap()["metadata"].clone();
+    assert_eq!(metadata["protocol"], json!("remote-executor"));
+    assert!(metadata["version"].as_str().unwrap_or_default().len() > 0);
     assert_eq!(metadata["capabilities"]["fileTransfer"], json!(true));
     assert_eq!(metadata["fileTransferPath"], json!("/re-file/v1"));
     let file_url = control_url

@@ -22,7 +22,7 @@ const READ_TIMEOUT: u64 = 10_000;
 const INPUT_TIMEOUT: u64 = 10_000;
 const INPUT_BYTES_LIMIT: usize = 4096;
 const DESCRIPTION_BYTES_LIMIT: usize = 100;
-const ASYNC_ID_BYTES_LIMIT: usize = 30;
+const ASYNC_ID_BYTES_LIMIT: usize = 50;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

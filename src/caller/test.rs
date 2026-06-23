@@ -203,6 +203,39 @@ async fn caller_routes_to_connected_executor() {
 }
 
 #[tokio::test]
+async fn caller_rejects_unreachable_executor_connection() {
+    let caller = Caller::new().await.unwrap();
+    let err = caller
+        .connect_to_executor(ConnectExecutorOptions {
+            id: "missing".to_string(),
+            url: "ws://127.0.0.1:9".to_string(),
+            system: None,
+            device: None,
+            labels: BTreeMap::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Connection refused")
+            || err.to_string().contains("connection refused")
+            || err.to_string().contains("failed"),
+        "{err}"
+    );
+
+    let listed = caller
+        .handle(ExecutorRequest {
+            id: json!("list-after-bad-connect"),
+            method: "list_executor".to_string(),
+            params: json!({}),
+            directory: None,
+            executor: None,
+            tool_timeout_ms: None,
+        })
+        .await;
+    assert!(!listed.result.unwrap().to_string().contains("missing"));
+}
+
+#[tokio::test]
 async fn caller_routes_remote_executor_across_multiple_directories() {
     let root = tempdir().unwrap();
     let alpha = root.path().join("alpha");

@@ -145,6 +145,8 @@ impl Executor {
     fn executor_info_result(&self) -> ToolResult {
         let value = serde_json::json!({
             "id": self.info.id,
+            "protocol": "remote-executor",
+            "version": env!("CARGO_PKG_VERSION"),
             "system": self.info.system,
             "device": self.info.device,
             "labels": self.info.labels,
